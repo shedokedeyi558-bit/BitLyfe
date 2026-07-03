@@ -223,3 +223,68 @@ CREATE TABLE IF NOT EXISTS error_logs (
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_webhook_logs_event_type ON webhook_logs(event_type);
 CREATE INDEX IF NOT EXISTS idx_error_logs_timestamp ON error_logs(timestamp);
+
+-- ─── PILLS TABLE ───────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pills (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  admin_id UUID REFERENCES admins(id),
+  question TEXT NOT NULL,
+  category VARCHAR(50),
+  entry_fee DECIMAL(10, 2) NOT NULL,
+  prize DECIMAL(10, 2) NOT NULL,
+  format TEXT CHECK (format IN ('multiple_choice', 'type_answer')) NOT NULL,
+  options JSONB,
+  correct_answer TEXT NOT NULL,
+  timer_seconds INTEGER DEFAULT 30,
+  case_sensitive BOOLEAN DEFAULT false,
+  status TEXT CHECK (status IN ('available', 'played', 'expired')) DEFAULT 'available',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pills_status ON pills(status);
+CREATE INDEX IF NOT EXISTS idx_pills_admin_id ON pills(admin_id);
+CREATE INDEX IF NOT EXISTS idx_pills_category ON pills(category);
+
+-- ─── PREDICTIONS TABLE ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS predictions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  admin_id UUID REFERENCES admins(id),
+  question TEXT NOT NULL,
+  category VARCHAR(50),
+  entry_fee DECIMAL(10, 2) NOT NULL,
+  prize_per_winner DECIMAL(10, 2) NOT NULL,
+  max_participants INTEGER DEFAULT 10,
+  current_participants INTEGER DEFAULT 0,
+  countdown_seconds INTEGER NOT NULL,
+  countdown_end_time TIMESTAMP WITH TIME ZONE NOT NULL,
+  correct_answer TEXT,
+  status TEXT CHECK (status IN ('active', 'locked', 'completed', 'cancelled')) DEFAULT 'active',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
+CREATE INDEX IF NOT EXISTS idx_predictions_admin_id ON predictions(admin_id);
+CREATE INDEX IF NOT EXISTS idx_predictions_category ON predictions(category);
+CREATE INDEX IF NOT EXISTS idx_predictions_countdown_end_time ON predictions(countdown_end_time);
+
+-- ─── PREDICTION PARTICIPATION TABLE ───────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS prediction_participations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  prediction_id UUID REFERENCES predictions(id) ON DELETE CASCADE,
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  answer TEXT NOT NULL,
+  is_correct BOOLEAN,
+  amount_won DECIMAL(10, 2) DEFAULT 0,
+  submitted_at TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(prediction_id, player_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prediction_participations_prediction_id ON prediction_participations(prediction_id);
+CREATE INDEX IF NOT EXISTS idx_prediction_participations_player_id ON prediction_participations(player_id);
+CREATE INDEX IF NOT EXISTS idx_prediction_participations_is_correct ON prediction_participations(is_correct);
