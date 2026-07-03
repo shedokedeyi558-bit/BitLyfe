@@ -4,5 +4,8 @@
   "description": "BitLyfe Backend",
   "engines": {
     "node": "22.x"
+  },
+  "scripts": {
+    "start": "cd server && npm start"
   }
 }
