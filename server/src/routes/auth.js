@@ -387,6 +387,72 @@ router.post('/verify-otp', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/phone-signin
+ * Sign in with phone number and password (no OTP required)
+ */
+router.post('/phone-signin', async (req, res) => {
+  try {
+    const { phone, password } = req.body;
+
+    if (!phone || !password) {
+      return res.status(400).json({ success: false, error: 'Phone and password are required.' });
+    }
+
+    const normalizedPhone = normalizePhone(phone);
+
+    // Fetch player by phone
+    const { data: player, error } = await supabase
+      .from('players')
+      .select('id, phone, password_hash, name, balance, is_admin, status')
+      .eq('phone', normalizedPhone)
+      .single();
+
+    if (error || !player) {
+      return res.status(401).json({ success: false, error: 'Player not found. Please sign up first.' });
+    }
+
+    // Check if banned
+    if (player.status === 'banned') {
+      return res.status(403).json({ success: false, error: 'This account has been banned.' });
+    }
+
+    // Check if password exists
+    if (!player.password_hash) {
+      return res.status(401).json({ success: false, error: 'Incorrect password.' });
+    }
+
+    // Compare password
+    const passwordMatch = await bcrypt.compare(password, player.password_hash);
+    if (!passwordMatch) {
+      return res.status(401).json({ success: false, error: 'Incorrect password.' });
+    }
+
+    // Generate token (same shape as verify-otp)
+    const token = jwt.sign(
+      { playerId: player.id, is_admin: player.is_admin },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        token,
+        player: {
+          id: player.id,
+          phone: player.phone,
+          name: player.name,
+          balance: player.balance,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Phone signin error:', err);
+    return res.status(500).json({ success: false, error: 'Server error.' });
+  }
+});
+
+/**
  * POST /api/auth/admin-login
  * Legacy endpoint: Admin login with email and password
  */
