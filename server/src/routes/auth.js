@@ -328,16 +328,17 @@ router.post('/register', async (req, res) => {
 /**
  * POST /api/auth/verify-otp
  * Legacy endpoint: Verify OTP (MVP: accept any 6-digit code)
+ * Optional: pass password in body to store a hashed password for phone-signin
  */
 router.post('/verify-otp', async (req, res) => {
   try {
-    const { phone, otp } = req.body;
+    const { phone, otp, password } = req.body;
 
     if (!phone || !otp) {
       return res.status(400).json({ success: false, error: 'Phone and OTP are required' });
     }
 
-    const normalizedPhone = phone.trim().replace(/\s+/g, '');
+    const normalizedPhone = normalizePhone(phone);
 
     // MVP: accept any 6-digit OTP
     if (!/^\d{6}$/.test(otp)) {
@@ -359,6 +360,15 @@ router.post('/verify-otp', async (req, res) => {
 
     if (player.status === 'banned') {
       return res.status(403).json({ success: false, error: 'Your account has been banned' });
+    }
+
+    // If password provided, hash and store it
+    if (password) {
+      const password_hash = await bcrypt.hash(password, 10);
+      await supabase
+        .from('players')
+        .update({ password_hash })
+        .eq('id', player.id);
     }
 
     const token = jwt.sign(
