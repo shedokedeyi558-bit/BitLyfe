@@ -1,0 +1,14 @@
+{
+  "name": "bitlyfe",
+  "version": "1.0.0",
+  "description": "BitLyfe Backend",
+  "main": "server/src/index.js",
+  "scripts": {
+    "start": "cd server && npm install && npm start",
+    "dev": "cd server && npm run dev",
+    "install": "cd server && npm install"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
