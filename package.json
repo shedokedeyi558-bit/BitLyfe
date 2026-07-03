@@ -1,5 +1,8 @@
 {
   "name": "bitlyfe",
   "version": "1.0.0",
-  "description": "BitLyfe Backend"
+  "description": "BitLyfe Backend",
+  "engines": {
+    "node": "22.x"
+  }
 }
