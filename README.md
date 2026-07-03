@@ -1,6 +1,6 @@
-# Triple Threat Quiz Game - Backend
+# BitLyfe - Backend
 
-A complete Node.js/Express backend for the Triple Threat quiz game with integrated Paystack payments, Supabase database, and unified games management system.
+A complete Node.js/Express backend for BitLyfe with integrated Paystack payments, Supabase database, and unified games management system.
 
 ## 🚀 Features
 
@@ -56,9 +56,9 @@ A complete Node.js/Express backend for the Triple Threat quiz game with integrat
 ### Setup Steps
 
 1. **Clone repository**
-```bash
+```
 git clone https://github.com/shedokedeyi558-bit/BitLyfe.git
-cd Anon-Backend/server
+cd BitLyfe/server
 ```
 
 2. **Install dependencies**

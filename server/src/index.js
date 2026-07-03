@@ -131,7 +131,7 @@ app.use((err, _req, res, _next) => {
 // ─── Start Server ─────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`Triple Threat backend running on port ${PORT}`);
+  console.log(`BitLyfe backend running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 

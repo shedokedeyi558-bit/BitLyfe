@@ -1,7 +1,7 @@
 {
-  "name": "triple-threat-backend",
+  "name": "bitlyfe-backend",
   "version": "1.0.0",
-  "description": "Triple Threat Quiz Game Backend",
+  "description": "BitLyfe - Backend API",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
