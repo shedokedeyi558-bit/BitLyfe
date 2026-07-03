@@ -165,3 +165,61 @@ CREATE INDEX IF NOT EXISTS idx_challenges_created_by ON challenges(created_by);
 CREATE INDEX IF NOT EXISTS idx_challenges_ends_at ON challenges(ends_at);
 CREATE INDEX IF NOT EXISTS idx_challenge_participations_challenge_id ON challenge_participations(challenge_id);
 CREATE INDEX IF NOT EXISTS idx_challenge_participations_player_id ON challenge_participations(player_id);
+
+-- Site content table (for terms of service, etc.)
+CREATE TABLE IF NOT EXISTS site_content (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  key TEXT UNIQUE NOT NULL,
+  content TEXT NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Seed default terms of service
+INSERT INTO site_content (key, content)
+VALUES ('terms', 'Welcome to BitLyfe! By using our platform, you agree to the following terms and conditions:
+
+1. ELIGIBILITY: You must be at least 18 years old to use BitLyfe.
+
+2. ACCOUNT SECURITY: You are responsible for maintaining the security of your account credentials.
+
+3. GAME RULES: All game outcomes are final. BitLyfe reserves the right to void fraudulent plays.
+
+4. WALLET & PAYMENTS: Deposits and withdrawals are processed through Paystack. Minimum withdrawal is ₦1,000.
+
+5. FAIR PLAY: Any attempt to cheat, exploit bugs, or manipulate the system will result in account suspension and forfeiture of funds.
+
+6. PRIVACY: We collect and store your phone number and transaction history. We do not share your data with third parties without consent.
+
+7. REFUNDS: Entry fees for completed games are non-refundable.
+
+8. SERVICE AVAILABILITY: BitLyfe may be temporarily unavailable for maintenance. We are not liable for losses due to downtime.
+
+9. MODIFICATIONS: We reserve the right to modify these terms at any time. Continued use constitutes acceptance.
+
+10. CONTACT: For support, contact us at support@bitlyfe.com.
+
+Last updated: 2026-07-03')
+ON CONFLICT (key) DO NOTHING;
+
+-- Webhook logs table
+CREATE TABLE IF NOT EXISTS webhook_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  event_type TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  status TEXT DEFAULT 'received',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Error logs table
+CREATE TABLE IF NOT EXISTS error_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  message TEXT NOT NULL,
+  stack TEXT,
+  route TEXT,
+  method TEXT,
+  timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_webhook_logs_event_type ON webhook_logs(event_type);
+CREATE INDEX IF NOT EXISTS idx_error_logs_timestamp ON error_logs(timestamp);

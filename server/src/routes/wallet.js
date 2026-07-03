@@ -47,8 +47,8 @@ router.post('/deposit', auth, async (req, res) => {
     const amountKobo = amountNaira * 100;
     const reference = `dep_${uuidv4()}`;
 
-    // Use phone as a pseudo-email for Paystack
-    const email = `${player.phone}@triplethreat.app`;
+    // Use phone as a pseudo-email for Paystack (fallback format)
+    const email = player.email || `${player.phone}@bitlyfe.app`;
 
     const paystackRes = await paystack.initializeTransaction({
       email,
