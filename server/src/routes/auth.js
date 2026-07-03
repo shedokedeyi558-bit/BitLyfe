@@ -249,8 +249,8 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Phone number is required' });
     }
 
-    // Normalize phone
-    const normalizedPhone = phone.trim().replace(/\s+/g, '');
+    // Normalize phone using shared helper
+    const normalizedPhone = normalizePhone(phone);
 
     // Check if player already exists
     const { data: existing } = await supabase
@@ -275,6 +275,7 @@ router.post('/register', async (req, res) => {
         data: {
           message: 'Welcome back! OTP sent to your phone.',
           isExisting: true,
+          phone: normalizedPhone,
         },
       });
     }
@@ -317,6 +318,7 @@ router.post('/register', async (req, res) => {
       data: {
         message: 'Account created! OTP sent to your phone.',
         isExisting: false,
+        phone: normalizedPhone,
       },
     });
   } catch (err) {
