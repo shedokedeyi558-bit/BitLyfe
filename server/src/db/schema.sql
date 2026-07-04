@@ -224,6 +224,36 @@ CREATE TABLE IF NOT EXISTS error_logs (
 CREATE INDEX IF NOT EXISTS idx_webhook_logs_event_type ON webhook_logs(event_type);
 CREATE INDEX IF NOT EXISTS idx_error_logs_timestamp ON error_logs(timestamp);
 
+-- ─── PILL PACKS TABLE ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pill_packs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL,
+  category VARCHAR(50),
+  status TEXT CHECK (status IN ('active', 'inactive', 'draft')) DEFAULT 'draft',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pill_packs_status ON pill_packs(status);
+
+-- Add pack_id and color to pills (run once)
+ALTER TABLE pills ADD COLUMN IF NOT EXISTS pack_id UUID REFERENCES pill_packs(id) ON DELETE SET NULL;
+ALTER TABLE pills ADD COLUMN IF NOT EXISTS color VARCHAR(20) DEFAULT '#00FF66';
+
+-- ─── PILL PLAYS TABLE (per-player tracking) ───────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pill_plays (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  pill_id UUID REFERENCES pills(id) ON DELETE CASCADE,
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  won BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(pill_id, player_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pill_plays_player_id ON pill_plays(player_id);
+CREATE INDEX IF NOT EXISTS idx_pill_plays_pill_id ON pill_plays(pill_id);
+
 -- ─── PILLS TABLE ───────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS pills (

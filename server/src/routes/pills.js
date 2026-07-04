@@ -1,20 +1,98 @@
 const express = require('express');
-const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
-const { checkAnswer, sanitizeQuestion } = require('../services/gameLogic');
+const { checkAnswer } = require('../services/gameLogic');
 
 const router = express.Router();
 
 /**
+ * GET /api/pills/packs
+ * Returns all active packs with their pills.
+ * Each pill shows status "played" if this player already played it.
+ * Does NOT expose question, options, or correct_answer.
+ */
+router.get('/packs', auth, async (req, res) => {
+  try {
+    const playerId = req.player.id;
+
+    // Fetch active packs
+    const { data: packs, error: packsErr } = await supabase
+      .from('pill_packs')
+      .select('id, name, category, status')
+      .eq('status', 'active')
+      .order('created_at', { ascending: false });
+
+    if (packsErr) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
+    }
+
+    if (!packs || packs.length === 0) {
+      return res.json({ success: true, data: { packs: [] } });
+    }
+
+    // Fetch all pills for these packs (no sensitive fields)
+    const packIds = packs.map((p) => p.id);
+    const { data: pills, error: pillsErr } = await supabase
+      .from('pills')
+      .select('id, pack_id, color, entry_fee, prize, status')
+      .in('pack_id', packIds)
+      .neq('status', 'expired');
+
+    if (pillsErr) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
+    }
+
+    // Fetch this player's played pills
+    const pillIds = (pills || []).map((p) => p.id);
+    let playedSet = new Set();
+
+    if (pillIds.length > 0) {
+      const { data: plays } = await supabase
+        .from('pill_plays')
+        .select('pill_id')
+        .eq('player_id', playerId)
+        .in('pill_id', pillIds);
+
+      playedSet = new Set((plays || []).map((p) => p.pill_id));
+    }
+
+    // Group pills by pack, mark per-player status
+    const pillsByPack = {};
+    for (const pill of pills || []) {
+      if (!pillsByPack[pill.pack_id]) pillsByPack[pill.pack_id] = [];
+      pillsByPack[pill.pack_id].push({
+        id: pill.id,
+        color: pill.color || '#00FF66',
+        price: parseFloat(pill.entry_fee),
+        prize: parseFloat(pill.prize),
+        status: playedSet.has(pill.id) ? 'played' : 'available',
+      });
+    }
+
+    const result = packs.map((pack) => ({
+      id: pack.id,
+      name: pack.name,
+      category: pack.category,
+      status: pack.status,
+      pills: pillsByPack[pack.id] || [],
+    }));
+
+    return res.json({ success: true, data: { packs: result } });
+  } catch (err) {
+    console.error('Get packs error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch pill packs' });
+  }
+});
+
+/**
  * GET /api/pills/available
- * Returns all unopened pills
+ * Returns all available pills (legacy endpoint, kept for compatibility)
  */
 router.get('/available', auth, async (req, res) => {
   try {
     const { data: pills, error } = await supabase
       .from('pills')
-      .select('id, question, category, entry_fee, prize, status, format, timer_seconds')
+      .select('id, question, category, entry_fee, prize, status, format, timer_seconds, color')
       .eq('status', 'available')
       .order('created_at', { ascending: false });
 
@@ -34,6 +112,7 @@ router.get('/available', auth, async (req, res) => {
           status: p.status,
           format: p.format,
           timer: p.timer_seconds,
+          color: p.color || '#00FF66',
         })),
       },
     });
@@ -45,7 +124,9 @@ router.get('/available', auth, async (req, res) => {
 
 /**
  * POST /api/pills/open
- * Deduct entry fee and open a pill (reveal question)
+ * Deduct entry fee and open a pill (reveal question).
+ * Uses pill_plays table for per-player tracking so the global pill
+ * status stays "available" for other players.
  * Body: { pillId }
  */
 router.post('/open', auth, async (req, res) => {
@@ -68,13 +149,20 @@ router.post('/open', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pill not found' });
     }
 
-    // Check if already played
-    if (pill.status === 'played') {
-      return res.status(409).json({ success: false, error: 'Pill already played' });
-    }
-
     if (pill.status === 'expired') {
       return res.status(409).json({ success: false, error: 'Pill has expired' });
+    }
+
+    // Check if this player already played this pill
+    const { data: existingPlay } = await supabase
+      .from('pill_plays')
+      .select('id')
+      .eq('pill_id', pillId)
+      .eq('player_id', player.id)
+      .single();
+
+    if (existingPlay) {
+      return res.status(409).json({ success: false, error: 'Pill already played' });
     }
 
     const entryFee = parseFloat(pill.entry_fee);
@@ -95,24 +183,28 @@ router.post('/open', auth, async (req, res) => {
       player_id: player.id,
       type: 'pill_open',
       amount: -entryFee,
-      description: `Opened pill: ${pill.question.substring(0, 50)}...`,
+      description: `Opened pill: ${pill.question.substring(0, 50)}`,
     });
 
-    // Return question without correct answer
-    const sanitizedQuestion = {
-      question: pill.question,
-      category: pill.category,
-      format: pill.format,
-      options: pill.options,
-      timer: pill.timer_seconds,
-      prize: parseFloat(pill.prize),
-      entryFee: entryFee,
-      newBalance: player.balance - entryFee,
-    };
+    // Create pill_play record (marks this player as having opened this pill)
+    await supabase.from('pill_plays').insert({
+      pill_id: pillId,
+      player_id: player.id,
+      won: false,
+    });
 
     return res.json({
       success: true,
-      data: sanitizedQuestion,
+      data: {
+        question: pill.question,
+        category: pill.category,
+        format: pill.format,
+        options: pill.options,
+        timer: pill.timer_seconds,
+        prize: parseFloat(pill.prize),
+        entryFee: entryFee,
+        newBalance: player.balance - entryFee,
+      },
     });
   } catch (err) {
     console.error('Open pill error:', err);
@@ -145,8 +237,16 @@ router.post('/submit', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pill not found' });
     }
 
-    if (pill.status !== 'played') {
-      return res.status(409).json({ success: false, error: 'Pill must be opened first' });
+    // Verify this player opened this pill
+    const { data: play } = await supabase
+      .from('pill_plays')
+      .select('id, won')
+      .eq('pill_id', pillId)
+      .eq('player_id', player.id)
+      .single();
+
+    if (!play) {
+      return res.status(409).json({ success: false, error: 'You must open this pill first' });
     }
 
     // Check answer
@@ -163,19 +263,17 @@ router.post('/submit', auth, async (req, res) => {
 
       const newBalance = (freshPlayer.balance || 0) + prize;
 
-      // Credit prize
-      await supabase
-        .from('players')
-        .update({ balance: newBalance })
-        .eq('id', player.id);
+      await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
 
-      // Record transaction
       await supabase.from('transactions').insert({
         player_id: player.id,
         type: 'pill_win',
         amount: prize,
-        description: `Won pill: ${pill.question.substring(0, 50)}...`,
+        description: `Won pill: ${pill.question.substring(0, 50)}`,
       });
+
+      // Mark play as won
+      await supabase.from('pill_plays').update({ won: true }).eq('id', play.id);
 
       return res.json({
         success: true,
@@ -188,7 +286,6 @@ router.post('/submit', auth, async (req, res) => {
       });
     }
 
-    // Wrong answer
     return res.json({
       success: true,
       data: {
