@@ -15,6 +15,61 @@ function calculatePrizePool(maxParticipants, stakeAmount) {
 }
 
 /**
+ * Format a pill for API response (never expose correct_answer to players)
+ */
+function formatPill(pill, { includeAnswer = true } = {}) {
+  const base = {
+    id: pill.id,
+    game_type: 'pills',
+    title: pill.question,
+    question: pill.question,
+    category: pill.category,
+    status: pill.status,
+    entry_fee: Number(pill.entry_fee),
+    prize: Number(pill.prize),
+    timer: pill.timer_seconds,
+    format: pill.format,
+    options: pill.options || null,
+    created_at: pill.created_at,
+    stats: {
+      total_players: pill._play_count || 0,
+      revenue: pill._revenue || 0,
+    },
+  };
+  if (includeAnswer) base.correct_answer = pill.correct_answer;
+  return base;
+}
+
+/**
+ * Format a prediction for API response
+ */
+function formatPrediction(prediction) {
+  const now = Date.now();
+  const countdownEnd = new Date(prediction.countdown_end_time).getTime();
+  return {
+    id: prediction.id,
+    game_type: 'predictions',
+    title: prediction.question,
+    question: prediction.question,
+    category: prediction.category,
+    status: prediction.status,
+    entry_fee: Number(prediction.entry_fee),
+    prize_per_winner: Number(prediction.prize_per_winner),
+    max_slots: prediction.max_participants,
+    slots_filled: prediction.current_participants,
+    countdown_end: prediction.countdown_end_time,
+    countdown_remaining_seconds: Math.max(0, Math.floor((countdownEnd - now) / 1000)),
+    answer_revealed_at: prediction.answer_revealed_at || null,
+    correct_answer: prediction.correct_answer || null,
+    created_at: prediction.created_at,
+    stats: {
+      total_players: prediction.current_participants,
+      revenue: prediction.current_participants * Number(prediction.entry_fee),
+    },
+  };
+}
+
+/**
  * Format a door game for API response
  */
 function formatDoorGame(door, question) {
@@ -71,41 +126,65 @@ function formatChallengeGame(challenge) {
 // ─── UNIFIED GAMES LIST ────────────────────────────────────────────────────
 /**
  * GET /api/admin/games
- * List all games (doors + challenges unified) with filtering and pagination
+ * List all games (doors + challenges + pills + predictions) with filtering
+ * Query: ?game_type=pills|predictions|door_game|challenge_game, ?status=active, ?page=1&limit=20
  */
 router.get('/', adminAuth, async (req, res) => {
   try {
-    const { type, status, page = 1, limit = 20, search } = req.query;
+    const { game_type, type, status, page = 1, limit = 20, search } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
+    const filterType = game_type || type; // accept both param names
 
     let games = [];
 
-    // Fetch doors if type is not 'challenge_game'
-    if (!type || type === 'door_game') {
+    // Fetch pills
+    if (!filterType || filterType === 'pills') {
+      const { data: pills } = await supabase
+        .from('pills')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (pills) games = games.concat(pills.map((p) => formatPill(p)));
+    }
+
+    // Fetch predictions
+    if (!filterType || filterType === 'predictions') {
+      const { data: predictions } = await supabase
+        .from('predictions')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (predictions) games = games.concat(predictions.map(formatPrediction));
+    }
+
+    // Fetch doors
+    if (!filterType || filterType === 'door_game') {
       const { data: doors } = await supabase.from('doors').select('*');
 
-      for (const door of doors) {
-        let question = null;
-        if (door.question_id) {
-          const { data: q } = await supabase
-            .from('questions')
-            .select('id, text, format, options')
-            .eq('id', door.question_id)
-            .single();
-          question = q;
+      if (doors) {
+        for (const door of doors) {
+          let question = null;
+          if (door.question_id) {
+            const { data: q } = await supabase
+              .from('questions')
+              .select('id, text, format, options')
+              .eq('id', door.question_id)
+              .single();
+            question = q;
+          }
+          games.push(formatDoorGame(door, question));
         }
-        games.push(formatDoorGame(door, question));
       }
     }
 
-    // Fetch challenges if type is not 'door_game'
-    if (!type || type === 'challenge_game') {
+    // Fetch challenges
+    if (!filterType || filterType === 'challenge_game') {
       const { data: challenges } = await supabase
         .from('challenges')
         .select('*')
         .order('created_at', { ascending: false });
 
-      games = games.concat(challenges.map(formatChallengeGame));
+      if (challenges) games = games.concat(challenges.map(formatChallengeGame));
     }
 
     // Filter by status
@@ -113,17 +192,19 @@ router.get('/', adminAuth, async (req, res) => {
       games = games.filter((g) => g.status === status);
     }
 
-    // Filter by search (title or description)
+    // Filter by search
     if (search) {
       const lowerSearch = search.toLowerCase();
       games = games.filter(
         (g) =>
           g.title?.toLowerCase().includes(lowerSearch) ||
-          g.description?.toLowerCase().includes(lowerSearch)
+          g.question?.toLowerCase().includes(lowerSearch)
       );
     }
 
-    // Apply pagination
+    // Sort all by created_at descending
+    games.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
     const total = games.length;
     games = games.slice(offset, offset + Number(limit));
 
@@ -146,27 +227,118 @@ router.get('/', adminAuth, async (req, res) => {
 // ─── CREATE GAME (MUST BE BEFORE /:id ROUTES) ─────────────────────────────
 /**
  * POST /api/admin/games/create
- * Create a new door or challenge game
+ * Create a new game: pills | predictions | door_game | challenge_game
  */
 router.post('/create', adminAuth, async (req, res) => {
   try {
     const { game_type, ...gameData } = req.body;
 
-    if (!game_type || !['door_game', 'challenge_game'].includes(game_type)) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'game_type must be "door_game" or "challenge_game"' });
+    if (!game_type || !['door_game', 'challenge_game', 'pills', 'predictions'].includes(game_type)) {
+      return res.status(400).json({
+        success: false,
+        error: 'game_type must be "pills", "predictions", "door_game", or "challenge_game"',
+      });
     }
 
+    // ── PILLS ──────────────────────────────────────────────────────────────
+    if (game_type === 'pills') {
+      const { title, question, category, entry_fee, prize, timer, format, options, correct_answer } = gameData;
+
+      const questionText = question || title;
+      if (!questionText || !format || !correct_answer || entry_fee === undefined || prize === undefined) {
+        return res.status(400).json({
+          success: false,
+          error: 'question, format, correct_answer, entry_fee, and prize are required for pills',
+        });
+      }
+
+      if (!['multiple_choice', 'type_answer'].includes(format)) {
+        return res.status(400).json({ success: false, error: 'format must be "multiple_choice" or "type_answer"' });
+      }
+
+      const { data: pill, error } = await supabase
+        .from('pills')
+        .insert({
+          admin_id: req.admin?.id || null,
+          question: questionText,
+          category: category || 'General',
+          entry_fee: Number(entry_fee),
+          prize: Number(prize),
+          format,
+          options: options || null,
+          correct_answer,
+          timer_seconds: timer || 30,
+          status: 'available',
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Pill creation error:', error);
+        return res.status(500).json({ success: false, error: 'Failed to create pill', details: error.message });
+      }
+
+      return res.status(201).json({
+        success: true,
+        data: { game: formatPill(pill) },
+      });
+    }
+
+    // ── PREDICTIONS ────────────────────────────────────────────────────────
+    if (game_type === 'predictions') {
+      const { title, question, category, entry_fee, prize_per_winner, max_slots, countdown_end } = gameData;
+
+      const questionText = question || title;
+      if (!questionText || entry_fee === undefined || prize_per_winner === undefined || !countdown_end) {
+        return res.status(400).json({
+          success: false,
+          error: 'question, entry_fee, prize_per_winner, and countdown_end are required for predictions',
+        });
+      }
+
+      const countdownEnd = new Date(countdown_end);
+      if (isNaN(countdownEnd.getTime())) {
+        return res.status(400).json({ success: false, error: 'countdown_end must be a valid ISO date string' });
+      }
+
+      const countdownSeconds = Math.max(0, Math.floor((countdownEnd.getTime() - Date.now()) / 1000));
+
+      const { data: prediction, error } = await supabase
+        .from('predictions')
+        .insert({
+          admin_id: req.admin?.id || null,
+          question: questionText,
+          category: category || 'General',
+          entry_fee: Number(entry_fee),
+          prize_per_winner: Number(prize_per_winner),
+          max_participants: max_slots || 100,
+          current_participants: 0,
+          countdown_seconds: countdownSeconds,
+          countdown_end_time: countdownEnd.toISOString(),
+          status: 'active',
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Prediction creation error:', error);
+        return res.status(500).json({ success: false, error: 'Failed to create prediction', details: error.message });
+      }
+
+      return res.status(201).json({
+        success: true,
+        data: { game: formatPrediction(prediction) },
+      });
+    }
+
+    // ── DOOR GAME ──────────────────────────────────────────────────────────
     if (game_type === 'door_game') {
-      // Create door game
       const { door_id, entry_fee, prize, question_id } = gameData;
 
       if (door_id === undefined) {
         return res.status(400).json({ success: false, error: 'door_id is required' });
       }
 
-      // Update door
       const { data: door, error } = await supabase
         .from('doors')
         .update({
@@ -197,49 +369,49 @@ router.post('/create', adminAuth, async (req, res) => {
         success: true,
         data: { game: formatDoorGame(door, question) },
       });
-    } else {
-      // Create challenge game
-      const { title, description, category, question_type, stake_amount, max_participants, countdown_duration, correct_answer } = gameData;
+    }
 
-      if (!title || !stake_amount || !max_participants) {
-        return res.status(400).json({
-          success: false,
-          error: 'title, stake_amount, and max_participants are required',
-        });
-      }
+    // ── CHALLENGE GAME ─────────────────────────────────────────────────────
+    const { title, description, category, question_type, stake_amount, max_participants, countdown_duration, correct_answer } = gameData;
 
-      const endsAt = new Date(Date.now() + (countdown_duration || 60) * 60 * 1000).toISOString();
-      const prizePool = calculatePrizePool(max_participants, stake_amount);
-
-      const { data: challenge, error } = await supabase
-        .from('challenges')
-        .insert({
-          title,
-          description,
-          category,
-          question_type: question_type || 'trivia',
-          stake_amount,
-          prize_pool: prizePool,
-          max_participants,
-          countdown_duration: countdown_duration || 60,
-          ends_at: endsAt,
-          correct_answer: correct_answer || null,
-          created_by: req.admin.id,
-          status: 'draft',
-        })
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Challenge creation error:', error);
-        return res.status(500).json({ success: false, error: 'Failed to create challenge', details: error.message });
-      }
-
-      return res.status(201).json({
-        success: true,
-        data: { game: formatChallengeGame(challenge) },
+    if (!title || !stake_amount || !max_participants) {
+      return res.status(400).json({
+        success: false,
+        error: 'title, stake_amount, and max_participants are required',
       });
     }
+
+    const endsAt = new Date(Date.now() + (countdown_duration || 60) * 60 * 1000).toISOString();
+    const prizePool = calculatePrizePool(max_participants, stake_amount);
+
+    const { data: challenge, error } = await supabase
+      .from('challenges')
+      .insert({
+        title,
+        description,
+        category,
+        question_type: question_type || 'trivia',
+        stake_amount,
+        prize_pool: prizePool,
+        max_participants,
+        countdown_duration: countdown_duration || 60,
+        ends_at: endsAt,
+        correct_answer: correct_answer || null,
+        created_by: req.admin?.id || null,
+        status: 'draft',
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Challenge creation error:', error);
+      return res.status(500).json({ success: false, error: 'Failed to create challenge', details: error.message });
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: { game: formatChallengeGame(challenge) },
+    });
   } catch (err) {
     console.error('Create game error:', err);
     return res.status(500).json({ success: false, error: 'Failed to create game', details: err.message });
@@ -250,35 +422,34 @@ router.post('/create', adminAuth, async (req, res) => {
 
 /**
  * GET /api/admin/games/:id
- * Get game details (door or challenge)
+ * Get game details — supports pills, predictions, challenges, doors
  */
 router.get('/:id', adminAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Try to find as challenge first
-    const { data: challenge } = await supabase
-      .from('challenges')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (challenge) {
-      return res.json({
-        success: true,
-        data: { game: formatChallengeGame(challenge) },
-      });
+    // Try pill first (UUID)
+    const { data: pill } = await supabase.from('pills').select('*').eq('id', id).single();
+    if (pill) {
+      return res.json({ success: true, data: { game: formatPill(pill) } });
     }
 
-    // Try to find as door
+    // Try prediction (UUID)
+    const { data: prediction } = await supabase.from('predictions').select('*').eq('id', id).single();
+    if (prediction) {
+      return res.json({ success: true, data: { game: formatPrediction(prediction) } });
+    }
+
+    // Try challenge (UUID)
+    const { data: challenge } = await supabase.from('challenges').select('*').eq('id', id).single();
+    if (challenge) {
+      return res.json({ success: true, data: { game: formatChallengeGame(challenge) } });
+    }
+
+    // Try door (integer ID)
     const doorId = parseInt(id);
     if (!isNaN(doorId)) {
-      const { data: door } = await supabase
-        .from('doors')
-        .select('*')
-        .eq('id', doorId)
-        .single();
-
+      const { data: door } = await supabase.from('doors').select('*').eq('id', doorId).single();
       if (door) {
         let question = null;
         if (door.question_id) {
@@ -289,10 +460,7 @@ router.get('/:id', adminAuth, async (req, res) => {
             .single();
           question = q;
         }
-        return res.json({
-          success: true,
-          data: { game: formatDoorGame(door, question) },
-        });
+        return res.json({ success: true, data: { game: formatDoorGame(door, question) } });
       }
     }
 
@@ -440,42 +608,37 @@ router.delete('/:id', adminAuth, async (req, res) => {
 
 /**
  * POST /api/admin/games/:id/activate
- * Transition: draft → active
+ * Transition: draft/available → active
  */
 router.post('/:id/activate', adminAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Only challenges support draft → active
-    const { data: challenge } = await supabase
-      .from('challenges')
-      .select('status')
-      .eq('id', id)
-      .single();
-
-    if (challenge) {
-      if (challenge.status !== 'draft') {
-        return res.status(400).json({
-          success: false,
-          error: `Challenge is ${challenge.status}. Can only activate from draft.`,
-        });
-      }
-
-      const { data: updated } = await supabase
-        .from('challenges')
-        .update({ status: 'active' })
-        .eq('id', id)
-        .select()
-        .single();
-
-      return res.json({
-        success: true,
-        data: { game: formatChallengeGame(updated) },
-      });
+    // Pill
+    const { data: pill } = await supabase.from('pills').select('status').eq('id', id).single();
+    if (pill) {
+      await supabase.from('pills').update({ status: 'available' }).eq('id', id);
+      return res.json({ success: true, data: { message: 'Pill activated', status: 'available' } });
     }
 
-    // Doors are always active
-    return res.status(400).json({ success: false, error: 'Door games cannot be activated' });
+    // Prediction
+    const { data: prediction } = await supabase.from('predictions').select('status').eq('id', id).single();
+    if (prediction) {
+      await supabase.from('predictions').update({ status: 'active' }).eq('id', id);
+      return res.json({ success: true, data: { message: 'Prediction activated', status: 'active' } });
+    }
+
+    // Challenge
+    const { data: challenge } = await supabase.from('challenges').select('status').eq('id', id).single();
+    if (challenge) {
+      if (challenge.status !== 'draft') {
+        return res.status(400).json({ success: false, error: `Challenge is ${challenge.status}. Can only activate from draft.` });
+      }
+      const { data: updated } = await supabase.from('challenges').update({ status: 'active' }).eq('id', id).select().single();
+      return res.json({ success: true, data: { game: formatChallengeGame(updated) } });
+    }
+
+    return res.status(404).json({ success: false, error: 'Game not found' });
   } catch (err) {
     console.error('Activate game error:', err);
     return res.status(500).json({ success: false, error: 'Failed to activate game' });
@@ -759,7 +922,7 @@ router.get('/:id/stats', adminAuth, async (req, res) => {
 
 /**
  * POST /api/admin/games/:id/reveal-answer
- * Reveal challenge answer and process winner payouts
+ * Reveal correct answer for pills, predictions, or challenges
  */
 router.post('/:id/reveal-answer', adminAuth, async (req, res) => {
   try {
@@ -770,103 +933,128 @@ router.post('/:id/reveal-answer', adminAuth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'correct_answer is required' });
     }
 
-    // Fetch challenge
-    const { data: challenge } = await supabase
-      .from('challenges')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (!challenge) {
-      return res.status(404).json({ success: false, error: 'Challenge not found' });
+    // ── PILL reveal ────────────────────────────────────────────────────────
+    const { data: pill } = await supabase.from('pills').select('*').eq('id', id).single();
+    if (pill) {
+      // Pill answers are instant — correct_answer is already stored at creation.
+      // Just mark correct_answer visible (it's already stored; this is a no-op for pills)
+      return res.json({
+        success: true,
+        data: {
+          message: 'Pill answer is already stored at creation time. Players see results immediately.',
+          game_type: 'pills',
+          correct_answer: pill.correct_answer,
+        },
+      });
     }
 
-    // Fetch all participations
+    // ── PREDICTION reveal ──────────────────────────────────────────────────
+    const { data: prediction } = await supabase.from('predictions').select('*').eq('id', id).single();
+    if (prediction) {
+      const { data: participations } = await supabase
+        .from('prediction_participations')
+        .select('*')
+        .eq('prediction_id', id);
+
+      const prizePerWinner = Number(prediction.prize_per_winner);
+      let winnersCount = 0;
+
+      for (const part of participations || []) {
+        const isCorrect = String(part.answer).toLowerCase().trim() === String(correct_answer).toLowerCase().trim();
+
+        await supabase
+          .from('prediction_participations')
+          .update({ is_correct: isCorrect, amount_won: isCorrect ? prizePerWinner : 0 })
+          .eq('id', part.id);
+
+        if (isCorrect) {
+          winnersCount++;
+          const { data: player } = await supabase.from('players').select('balance').eq('id', part.player_id).single();
+          await supabase.from('players').update({ balance: (player?.balance || 0) + prizePerWinner }).eq('id', part.player_id);
+          await supabase.from('transactions').insert({
+            player_id: part.player_id,
+            type: 'prediction_win',
+            amount: prizePerWinner,
+            description: `Won prediction: ${prediction.question.substring(0, 50)}`,
+          });
+        }
+      }
+
+      await supabase.from('predictions').update({
+        correct_answer,
+        status: 'completed',
+        updated_at: new Date().toISOString(),
+      }).eq('id', id);
+
+      return res.json({
+        success: true,
+        data: {
+          message: 'Answer revealed and winners credited',
+          game_type: 'predictions',
+          correct_answer,
+          total_participants: participations?.length || 0,
+          winners: winnersCount,
+          total_prize_paid: winnersCount * prizePerWinner,
+        },
+      });
+    }
+
+    // ── CHALLENGE reveal ───────────────────────────────────────────────────
+    const { data: challenge } = await supabase.from('challenges').select('*').eq('id', id).single();
+    if (!challenge) {
+      return res.status(404).json({ success: false, error: 'Game not found' });
+    }
+
     const { data: participations } = await supabase
       .from('challenge_participations')
       .select('id, player_id, player_answer')
       .eq('challenge_id', id);
 
-    // Determine winners (case-insensitive, trimmed comparison)
     const normalizedCorrectAnswer = String(correct_answer).trim().toLowerCase();
     let totalCorrect = 0;
-    let totalIncorrect = 0;
     const updates = [];
 
     for (const p of participations) {
-      const normalizedPlayerAnswer = String(p.player_answer).trim().toLowerCase();
-      const isCorrect = normalizedPlayerAnswer === normalizedCorrectAnswer;
-
+      const isCorrect = String(p.player_answer).trim().toLowerCase() === normalizedCorrectAnswer;
       if (isCorrect) totalCorrect++;
-      else totalIncorrect++;
-
-      updates.push({
-        id: p.id,
-        is_correct: isCorrect,
-        player_id: p.player_id,
-      });
+      updates.push({ id: p.id, is_correct: isCorrect, player_id: p.player_id });
     }
 
-    // Calculate payout per winner
     const totalStake = challenge.current_participants * challenge.stake_amount;
     const prizePool = Math.floor(totalStake * 0.8);
     const amountPerWinner = totalCorrect > 0 ? Math.floor(prizePool / totalCorrect) : 0;
-
-    // Update participations and credit winners
     let totalPaid = 0;
 
     for (const update of updates) {
       if (update.is_correct && amountPerWinner > 0) {
-        // Credit winner
-        const { data: player } = await supabase
-          .from('players')
-          .select('balance')
-          .eq('id', update.player_id)
-          .single();
-
-        await supabase
-          .from('players')
-          .update({ balance: (player?.balance || 0) + amountPerWinner })
-          .eq('id', update.player_id);
-
-        // Record win transaction
+        const { data: player } = await supabase.from('players').select('balance').eq('id', update.player_id).single();
+        await supabase.from('players').update({ balance: (player?.balance || 0) + amountPerWinner }).eq('id', update.player_id);
         await supabase.from('transactions').insert({
           player_id: update.player_id,
           type: 'challenge_win',
           amount: amountPerWinner,
           description: `Won challenge: ${challenge.title}`,
         });
-
         totalPaid += amountPerWinner;
       }
-
-      // Update participation record
-      await supabase
-        .from('challenge_participations')
-        .update({
-          is_correct: update.is_correct,
-          amount_won: update.is_correct ? amountPerWinner : 0,
-        })
+      await supabase.from('challenge_participations')
+        .update({ is_correct: update.is_correct, amount_won: update.is_correct ? amountPerWinner : 0 })
         .eq('id', update.id);
     }
 
-    // Mark challenge as closed
-    await supabase
-      .from('challenges')
-      .update({
-        status: 'closed',
-        correct_answer,
-        answer_reveal_at: new Date().toISOString(),
-      })
-      .eq('id', id);
+    await supabase.from('challenges').update({
+      status: 'closed',
+      correct_answer,
+      answer_reveal_at: new Date().toISOString(),
+    }).eq('id', id);
 
     return res.json({
       success: true,
       data: {
         message: 'Answer revealed and winners paid',
+        game_type: 'challenge_game',
         total_participants: challenge.current_participants,
         total_correct: totalCorrect,
-        total_incorrect: totalIncorrect,
         prize_per_winner: amountPerWinner,
         total_paid: totalPaid,
       },
