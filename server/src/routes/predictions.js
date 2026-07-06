@@ -8,7 +8,7 @@ const router = express.Router();
 
 /**
  * GET /api/predictions/active
- * Returns only active predictions with countdown remaining
+ * Returns active (and locked) predictions with countdown remaining
  */
 router.get('/active', auth, async (req, res) => {
   try {
@@ -17,7 +17,7 @@ router.get('/active', auth, async (req, res) => {
     const { data: predictions, error } = await supabase
       .from('predictions')
       .select('id, question, category, entry_fee, prize_per_winner, max_participants, current_participants, countdown_end_time, status')
-      .eq('status', 'active')
+      .in('status', ['active', 'locked'])
       .order('countdown_end_time', { ascending: true });
 
     if (error) {
@@ -33,7 +33,7 @@ router.get('/active', auth, async (req, res) => {
         id: p.id,
         question: p.question,
         category: p.category,
-        fee: parseFloat(p.entry_fee),
+        fee: parseFloat(p.entry_fee),          // always "fee" not "entry_fee"
         prize_per_winner: parseFloat(p.prize_per_winner),
         slots_filled: p.current_participants,
         max_slots: p.max_participants,
@@ -95,20 +95,26 @@ router.post('/enter', auth, async (req, res) => {
     // Check if already participated
     const { data: existing } = await supabase
       .from('prediction_participations')
-      .select('id')
+      .select('id, answer')
       .eq('prediction_id', predictionId)
       .eq('player_id', player.id)
       .single();
 
     if (existing) {
-      return res.status(409).json({ success: false, error: 'Already participated in this prediction' });
+      // Already entered — tell frontend clearly so it can skip to submit step
+      return res.status(409).json({
+        success: false,
+        error: 'Already entered this prediction',
+        already_entered: true,
+        has_submitted: existing.answer !== null,
+      });
     }
 
     // Deduct entry fee
     const newBalance = player.balance - entryFee;
     await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
 
-    // Create participation record
+    // Create participation record (answer is null until /submit is called)
     await supabase.from('prediction_participations').insert({
       prediction_id: predictionId,
       player_id: player.id,
@@ -191,7 +197,7 @@ router.post('/submit', auth, async (req, res) => {
 
     // Check if already submitted
     if (participation.answer !== null) {
-      return res.status(409).json({ success: false, error: 'Already submitted' });
+      return res.status(409).json({ success: false, error: 'Already submitted your prediction' });
     }
 
     // Update participation with answer
@@ -215,7 +221,8 @@ router.post('/submit', auth, async (req, res) => {
 
 /**
  * GET /api/predictions/result/:id
- * Get result of a prediction (only if answer is marked)
+ * Get result of a prediction (only if admin has marked the answer)
+ * Returns 404 cleanly if answer not revealed yet — no "Not participated" banner
  */
 router.get('/result/:id', auth, async (req, res) => {
   try {
@@ -233,21 +240,21 @@ router.get('/result/:id', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Prediction not found' });
     }
 
-    // Check if correct_answer is set
-    if (!prediction.correct_answer) {
+    // Check if admin has revealed the answer — return 404 if not yet
+    if (!prediction.correct_answer || prediction.status !== 'completed') {
       return res.status(404).json({ success: false, error: 'Result not available yet' });
     }
 
-    // Fetch player's participation
-    const { data: participation, error: partErr } = await supabase
+    // Now check participation
+    const { data: participation } = await supabase
       .from('prediction_participations')
       .select('*')
       .eq('prediction_id', predictionId)
       .eq('player_id', player.id)
       .single();
 
-    if (partErr || !participation) {
-      return res.status(404).json({ success: false, error: 'Not participated in this prediction' });
+    if (!participation) {
+      return res.status(404).json({ success: false, error: 'You did not participate in this prediction' });
     }
 
     const won = participation.is_correct === true;
@@ -263,11 +270,11 @@ router.get('/result/:id', auth, async (req, res) => {
     return res.json({
       success: true,
       data: {
-        won: won,
+        won,
         correctAnswer: prediction.correct_answer,
         yourAnswer: participation.answer,
         prize: amountWon,
-        newBalance: parseFloat(freshPlayer.balance),
+        newBalance: parseFloat(freshPlayer?.balance || 0),
       },
     });
   } catch (err) {
