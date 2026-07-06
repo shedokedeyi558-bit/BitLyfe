@@ -254,6 +254,86 @@ CREATE TABLE IF NOT EXISTS pill_plays (
 CREATE INDEX IF NOT EXISTS idx_pill_plays_player_id ON pill_plays(player_id);
 CREATE INDEX IF NOT EXISTS idx_pill_plays_pill_id ON pill_plays(pill_id);
 
+-- ─── BLITZ TOURNAMENTS ────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS blitz_tournaments (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  title TEXT NOT NULL,
+  description TEXT,
+  entry_fee INTEGER NOT NULL,
+  question_count INTEGER NOT NULL,
+  time_limit_seconds INTEGER NOT NULL,
+  registration_start TIMESTAMP WITH TIME ZONE NOT NULL,
+  tournament_start TIMESTAMP WITH TIME ZONE NOT NULL,
+  tournament_end TIMESTAMP WITH TIME ZONE NOT NULL,
+  status TEXT CHECK (status IN ('draft', 'registration', 'active', 'scoring', 'completed')) DEFAULT 'draft',
+  total_registered INTEGER DEFAULT 0,
+  prize_pool INTEGER DEFAULT 0,
+  platform_cut_percent INTEGER DEFAULT 50,
+  created_by UUID,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_blitz_tournaments_status ON blitz_tournaments(status);
+
+CREATE TABLE IF NOT EXISTS blitz_questions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  format TEXT CHECK (format IN ('multiple_choice', 'type_answer')) NOT NULL,
+  options JSONB,
+  correct_answer TEXT NOT NULL,
+  order_index INTEGER NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_blitz_questions_tournament_id ON blitz_questions(tournament_id);
+
+CREATE TABLE IF NOT EXISTS blitz_registrations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE CASCADE,
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  entry_fee_paid INTEGER NOT NULL,
+  ticket TEXT,
+  registered_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(tournament_id, player_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blitz_registrations_tournament_id ON blitz_registrations(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_blitz_registrations_player_id ON blitz_registrations(player_id);
+
+CREATE TABLE IF NOT EXISTS blitz_attempts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE CASCADE,
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  answers JSONB NOT NULL,
+  score INTEGER NOT NULL,
+  total_time_ms INTEGER NOT NULL,
+  started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  completed_at TIMESTAMP WITH TIME ZONE,
+  status TEXT CHECK (status IN ('in_progress', 'completed')) DEFAULT 'in_progress',
+  UNIQUE(tournament_id, player_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blitz_attempts_tournament_id ON blitz_attempts(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_blitz_attempts_player_id ON blitz_attempts(player_id);
+CREATE INDEX IF NOT EXISTS idx_blitz_attempts_score ON blitz_attempts(tournament_id, score DESC, total_time_ms ASC);
+
+CREATE TABLE IF NOT EXISTS blitz_prizes (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE CASCADE,
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  prize_type TEXT CHECK (prize_type IN ('cash', 'free_ticket')) NOT NULL,
+  amount INTEGER DEFAULT 0,
+  ticket_code TEXT,
+  distributed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_blitz_prizes_tournament_id ON blitz_prizes(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_blitz_prizes_player_id ON blitz_prizes(player_id);
+CREATE INDEX IF NOT EXISTS idx_blitz_prizes_ticket_code ON blitz_prizes(ticket_code);
+
 -- ─── PILLS TABLE ───────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS pills (
