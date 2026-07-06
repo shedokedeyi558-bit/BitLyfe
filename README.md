@@ -6,29 +6,29 @@ A complete Node.js/Express backend for BitLyfe with integrated Paystack payments
 
 ### Core Game Features
 - **3-Door Quiz Game**: Players answer questions to win prizes
-- **Challenge System**: Time-limited prediction challenges with auto-lock
-- **Wallet System**: Manage player balances with deposits and withdrawals
-- **Paystack Integration**: Seamless payment processing for deposits
-- **Winner Masking**: Recent winners display only last 4 digits of phone
+- **Pills Game**: Grouped pills with colors, entry fees, and prizes
+- **Predictions (Time Machine)**: Countdown-based predictions with auto-lock
+- **Blitz Tournaments**: Multi-player tournaments with ranking and prize distribution
+- **Wallet System**: Manage player balances with Paystack deposits and withdrawals
 
 ### Administration
-- **Admin Dashboard API**: Comprehensive endpoints for game management
-- **Unified Games API**: Single interface for doors and challenges
+- **Admin Dashboard API**: Comprehensive endpoints for all game management
+- **Seed Data Endpoint**: `POST /api/admin/seed` - Create 3 packs, 3 predictions, 3 tournaments instantly
 - **Statistics & Analytics**: Detailed game performance metrics
-- **Player Management**: View, search, and manage players
+- **Player Management**: View, search, and manage all players
 - **Withdrawal Management**: Process withdrawal requests with auto-approval options
 
 ### Authentication
-- **Dual Authentication**: Email/password signup + legacy phone OTP
+- **Triple Auth**: Email/password, phone/OTP, and phone/password signin
 - **JWT Tokens**: Secure 30-day token expiration
-- **Role-Based Access**: Admin flag for permission management
-- **Password Hashing**: Bcrypt with 10 salt rounds
+- **Admin System**: Dedicated admin accounts with role-based access
+- **Password Security**: Bcrypt hashing with 10 salt rounds
 
 ### Database
 - **Supabase PostgreSQL**: Cloud database with RLS policies
-- **7 Core Tables**: Players, Questions, Doors, Game Sessions, Transactions, Challenges, Withdrawals
+- **20+ Tables**: Full schema for all game modes
 - **Relationship Integrity**: Foreign keys and constraints
-- **Security**: Row-level security policies enabled
+- **Performance**: Optimized indexes for fast queries
 
 ---
 
@@ -160,6 +160,11 @@ NODE_ENV=development
 - `GET /api/admin/questions` - List questions
 - `POST /api/admin/questions` - Create question
 - `POST /api/admin/questions/bulk-import` - Bulk import
+- `POST /api/admin/seed` - Create seed data (3 packs, 3 predictions, 3 tournaments)
+- `GET /api/admin/pills/packs` - List pill packs
+- `GET /api/admin/predictions` - List predictions
+- `GET /api/admin/blitz` - List tournaments
+- And 30+ more endpoints...
 
 ### Webhooks
 - `POST /api/webhooks/paystack` - Paystack payment webhook

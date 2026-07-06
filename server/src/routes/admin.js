@@ -556,6 +556,477 @@ router.get('/analytics/activity', async (req, res) => {
 
 // ─── EXPORT ───────────────────────────────────────────────────────────────────
 
+// ─── SEED DATA ────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/admin/seed
+ * Creates sample games for testing the admin dashboard
+ * Creates: 3 pill packs, 3 predictions, 3 blitz tournaments with dummy data
+ */
+router.post('/seed', async (req, res) => {
+  try {
+    // Get admin ID from JWT token
+    const adminId = req.user?.adminId || req.user?.playerId;
+    if (!adminId) {
+      return res.status(401).json({ success: false, error: 'Admin authentication required' });
+    }
+
+    // Helper function to generate random ID
+    const generateId = () => Math.random().toString(36).substring(2, 15);
+
+    // ─── CREATE PILL PACKS ───────────────────────────────────────────────────
+
+    // Pack 1: General Knowledge Pack (active)
+    const pack1 = {
+      name: 'General Knowledge Pack',
+      category: 'General Knowledge',
+      status: 'active',
+    };
+
+    // Pack 2: Sports Pack (draft)
+    const pack2 = {
+      name: 'Sports Pack',
+      category: 'Sports',
+      status: 'draft',
+    };
+
+    // Pack 3: Entertainment Pack (active)
+    const pack3 = {
+      name: 'Entertainment Pack',
+      category: 'Entertainment',
+      status: 'active',
+    };
+
+    const { data: packs, error: packsErr } = await supabase
+      .from('pill_packs')
+      .insert([pack1, pack2, pack3])
+      .select();
+
+    if (packsErr || !packs || packs.length !== 3) {
+      console.error('Pill packs creation error:', packsErr);
+      return res.status(500).json({ success: false, error: 'Failed to create pill packs' });
+    }
+
+    // ─── CREATE PILLS FOR EACH PACK ──────────────────────────────────────────
+
+    const pillsToCreate = [
+      // Pack 1: General Knowledge (3 pills)
+      {
+        pack_id: packs[0].id,
+        admin_id: adminId,
+        question: 'What is the capital of France?',
+        category: 'General Knowledge',
+        entry_fee: 200,
+        prize: 1000,
+        format: 'multiple_choice',
+        options: ['London', 'Paris', 'Berlin', 'Madrid'],
+        correct_answer: 'Paris',
+        timer_seconds: 30,
+        color: '#FF4444',
+      },
+      {
+        pack_id: packs[0].id,
+        admin_id: adminId,
+        question: 'What is the largest planet in our solar system?',
+        category: 'General Knowledge',
+        entry_fee: 200,
+        prize: 1000,
+        format: 'multiple_choice',
+        options: ['Saturn', 'Mars', 'Jupiter', 'Neptune'],
+        correct_answer: 'Jupiter',
+        timer_seconds: 30,
+        color: '#44FF88',
+      },
+      {
+        pack_id: packs[0].id,
+        admin_id: adminId,
+        question: 'In what year did the Titanic sink?',
+        category: 'General Knowledge',
+        entry_fee: 200,
+        prize: 1000,
+        format: 'multiple_choice',
+        options: ['1912', '1915', '1920', '1905'],
+        correct_answer: '1912',
+        timer_seconds: 30,
+        color: '#8844FF',
+      },
+      // Pack 2: Sports (2 pills)
+      {
+        pack_id: packs[1].id,
+        admin_id: adminId,
+        question: 'How many players are on a soccer team?',
+        category: 'Sports',
+        entry_fee: 500,
+        prize: 2000,
+        format: 'multiple_choice',
+        options: ['9', '10', '11', '12'],
+        correct_answer: '11',
+        timer_seconds: 30,
+        color: '#FFD700',
+      },
+      {
+        pack_id: packs[1].id,
+        admin_id: adminId,
+        question: 'Which country won the 2022 FIFA World Cup?',
+        category: 'Sports',
+        entry_fee: 500,
+        prize: 2000,
+        format: 'multiple_choice',
+        options: ['France', 'Brazil', 'Argentina', 'Germany'],
+        correct_answer: 'Argentina',
+        timer_seconds: 30,
+        color: '#FF69B4',
+      },
+      // Pack 3: Entertainment (4 pills)
+      {
+        pack_id: packs[2].id,
+        admin_id: adminId,
+        question: 'Who directed the movie Inception?',
+        category: 'Entertainment',
+        entry_fee: 100,
+        prize: 500,
+        format: 'multiple_choice',
+        options: ['Martin Scorsese', 'Christopher Nolan', 'Denis Villeneuve', 'Quentin Tarantino'],
+        correct_answer: 'Christopher Nolan',
+        timer_seconds: 30,
+        color: '#00CED1',
+      },
+      {
+        pack_id: packs[2].id,
+        admin_id: adminId,
+        question: 'Which artist painted the Starry Night?',
+        category: 'Entertainment',
+        entry_fee: 100,
+        prize: 500,
+        format: 'multiple_choice',
+        options: ['Pablo Picasso', 'Vincent van Gogh', 'Claude Monet', 'Salvador Dali'],
+        correct_answer: 'Vincent van Gogh',
+        timer_seconds: 30,
+        color: '#32CD32',
+      },
+      {
+        pack_id: packs[2].id,
+        admin_id: adminId,
+        question: 'What is the best-selling video game of all time?',
+        category: 'Entertainment',
+        entry_fee: 100,
+        prize: 500,
+        format: 'multiple_choice',
+        options: ['Minecraft', 'Tetris', 'Wii Sports', 'Grand Theft Auto V'],
+        correct_answer: 'Minecraft',
+        timer_seconds: 30,
+        color: '#FF8C00',
+      },
+      {
+        pack_id: packs[2].id,
+        admin_id: adminId,
+        question: 'Which series won the Emmy for Outstanding Drama Series in 2023?',
+        category: 'Entertainment',
+        entry_fee: 100,
+        prize: 500,
+        format: 'multiple_choice',
+        options: ['Breaking Bad', 'Game of Thrones', 'Succession', 'The Crown'],
+        correct_answer: 'Succession',
+        timer_seconds: 30,
+        color: '#9370DB',
+      },
+    ];
+
+    const { data: pills, error: pillsErr } = await supabase
+      .from('pills')
+      .insert(pillsToCreate)
+      .select();
+
+    if (pillsErr || !pills) {
+      console.error('Pills creation error:', pillsErr);
+      return res.status(500).json({ success: false, error: 'Failed to create pills' });
+    }
+
+    // ─── CREATE PREDICTIONS ───────────────────────────────────────────────────
+
+    const now = new Date();
+    const in2Hours = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const pastCountdown = new Date(now.getTime() - 1 * 60 * 60 * 1000);
+
+    const predictionsToCreate = [
+      {
+        admin_id: adminId,
+        question: 'How many goals will Manchester United score this weekend?',
+        category: 'Football',
+        entry_fee: 500,
+        prize_per_winner: 2000,
+        max_participants: 50,
+        current_participants: 15,
+        countdown_seconds: 7200,
+        countdown_end_time: in2Hours.toISOString(),
+        status: 'active',
+      },
+      {
+        admin_id: adminId,
+        question: 'Will Bitcoin reach $50,000?',
+        category: 'Cryptocurrency',
+        entry_fee: 1000,
+        prize_per_winner: 5000,
+        max_participants: 100,
+        current_participants: 30,
+        countdown_seconds: 3600,
+        countdown_end_time: pastCountdown.toISOString(),
+        status: 'locked',
+      },
+      {
+        admin_id: adminId,
+        question: 'Who will win the next election?',
+        category: 'Politics',
+        entry_fee: 2000,
+        prize_per_winner: 10000,
+        max_participants: 200,
+        current_participants: 0,
+        countdown_seconds: 86400,
+        countdown_end_time: in24Hours.toISOString(),
+        status: 'draft',
+      },
+    ];
+
+    const { data: predictions, error: predictionsErr } = await supabase
+      .from('predictions')
+      .insert(predictionsToCreate)
+      .select();
+
+    if (predictionsErr || !predictions || predictions.length !== 3) {
+      console.error('Predictions creation error:', predictionsErr);
+      return res.status(500).json({ success: false, error: 'Failed to create predictions' });
+    }
+
+    // Create dummy prediction participations for first prediction (15 players)
+    const predictionParticipations = [];
+    for (let i = 0; i < 15; i++) {
+      predictionParticipations.push({
+        prediction_id: predictions[0].id,
+        player_id: null, // Dummy entries, no actual player
+        answer: Math.floor(Math.random() * 5).toString(),
+        is_correct: false,
+        submitted_at: new Date().toISOString(),
+      });
+    }
+
+    // Create dummy participations for second prediction (30 players)
+    for (let i = 0; i < 30; i++) {
+      predictionParticipations.push({
+        prediction_id: predictions[1].id,
+        player_id: null,
+        answer: i % 2 === 0 ? 'yes' : 'no',
+        is_correct: false,
+        submitted_at: pastCountdown.toISOString(),
+      });
+    }
+
+    if (predictionParticipations.length > 0) {
+      const { error: partErr } = await supabase
+        .from('prediction_participations')
+        .insert(predictionParticipations);
+
+      if (partErr) {
+        console.error('Prediction participations error:', partErr);
+        // Continue anyway, participations are optional for seed
+      }
+    }
+
+    // ─── CREATE BLITZ TOURNAMENTS ────────────────────────────────────────────
+
+    const in30Mins = new Date(now.getTime() + 30 * 60 * 1000);
+    const in10Mins = new Date(now.getTime() + 10 * 60 * 1000);
+    const past30Mins = new Date(now.getTime() - 30 * 60 * 1000);
+    const past10Mins = new Date(now.getTime() - 10 * 60 * 1000);
+
+    const tournamentsToCreate = [
+      {
+        title: 'Speed Quiz Challenge',
+        description: 'Answer as many questions as you can in 2 minutes',
+        entry_fee: 500,
+        question_count: 10,
+        time_limit_seconds: 120,
+        registration_start: new Date(now.getTime() - 60 * 60 * 1000).toISOString(),
+        tournament_start: in30Mins.toISOString(),
+        tournament_end: new Date(in30Mins.getTime() + 2 * 60 * 60 * 1000).toISOString(),
+        status: 'registration',
+        total_registered: 25,
+        prize_pool: 12500,
+        platform_cut_percent: 50,
+        created_by: adminId,
+      },
+      {
+        title: 'Football Legends',
+        description: 'Test your knowledge on football history and legends',
+        entry_fee: 1000,
+        question_count: 20,
+        time_limit_seconds: 180,
+        registration_start: new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(),
+        tournament_start: in10Mins.toISOString(),
+        tournament_end: new Date(in10Mins.getTime() + 3 * 60 * 60 * 1000).toISOString(),
+        status: 'active',
+        total_registered: 100,
+        prize_pool: 100000,
+        platform_cut_percent: 50,
+        created_by: adminId,
+      },
+      {
+        title: 'Crypto Quiz Showdown',
+        description: 'Master the cryptocurrency questions',
+        entry_fee: 1000,
+        question_count: 15,
+        time_limit_seconds: 150,
+        registration_start: new Date(now.getTime() - 4 * 60 * 60 * 1000).toISOString(),
+        tournament_start: past30Mins.toISOString(),
+        tournament_end: past10Mins.toISOString(),
+        status: 'completed',
+        total_registered: 80,
+        prize_pool: 80000,
+        platform_cut_percent: 50,
+        created_by: adminId,
+      },
+    ];
+
+    const { data: tournaments, error: tournamentsErr } = await supabase
+      .from('blitz_tournaments')
+      .insert(tournamentsToCreate)
+      .select();
+
+    if (tournamentsErr || !tournaments || tournaments.length !== 3) {
+      console.error('Tournaments creation error:', tournamentsErr);
+      return res.status(500).json({ success: false, error: 'Failed to create tournaments' });
+    }
+
+    // Create questions for each tournament
+    const blitzQuestionsToCreate = [];
+    const questionSets = [
+      [
+        { q: 'What is 2+2?', a: '4' },
+        { q: 'What is the capital of Nigeria?', a: 'Abuja' },
+      ],
+      [
+        { q: 'How many goals did Messi score in 2023?', a: '42' },
+        { q: 'Which club did Ronaldo join in 2023?', a: 'Al Nassr' },
+      ],
+      [
+        { q: 'What year was Bitcoin created?', a: '2009' },
+        { q: 'Who created Bitcoin?', a: 'Satoshi Nakamoto' },
+      ],
+    ];
+
+    for (let tIdx = 0; tIdx < tournaments.length; tIdx++) {
+      const qSet = questionSets[tIdx];
+      for (let qIdx = 0; qIdx < qSet.length; qIdx++) {
+        blitzQuestionsToCreate.push({
+          tournament_id: tournaments[tIdx].id,
+          question: qSet[qIdx].q,
+          format: 'type_answer',
+          correct_answer: qSet[qIdx].a,
+          order_index: qIdx + 1,
+        });
+      }
+    }
+
+    const { error: blitzQErr } = await supabase
+      .from('blitz_questions')
+      .insert(blitzQuestionsToCreate);
+
+    if (blitzQErr) {
+      console.error('Blitz questions error:', blitzQErr);
+      // Continue anyway
+    }
+
+    // Create dummy leaderboard data for completed tournament
+    const blitzAttemptsToCreate = [];
+    for (let i = 0; i < 80; i++) {
+      const score = Math.max(0, 2 - Math.floor(Math.random() * 3)); // 0, 1, or 2
+      blitzAttemptsToCreate.push({
+        tournament_id: tournaments[2].id, // Completed tournament
+        player_id: null, // Dummy
+        answers: [
+          { question_id: '1', answer: Math.random() > 0.5 ? '4' : '5', is_correct: Math.random() > 0.5 },
+          { question_id: '2', answer: Math.random() > 0.5 ? 'Abuja' : 'Lagos', is_correct: Math.random() > 0.5 },
+        ],
+        score,
+        total_time_ms: Math.random() * 150000,
+        started_at: past30Mins.toISOString(),
+        completed_at: past10Mins.toISOString(),
+        status: 'completed',
+      });
+    }
+
+    if (blitzAttemptsToCreate.length > 0) {
+      const { error: attErr } = await supabase
+        .from('blitz_attempts')
+        .insert(blitzAttemptsToCreate);
+
+      if (attErr) {
+        console.error('Blitz attempts error:', attErr);
+        // Continue anyway
+      }
+    }
+
+    // Create prize entries for completed tournament
+    const blitzPrizesToCreate = [];
+    // Top 3 get cash, 4-10 get free tickets
+    const prizeDistribution = [
+      { position: 1, type: 'cash', amount: 40000 },
+      { position: 2, type: 'cash', amount: 24000 },
+      { position: 3, type: 'cash', amount: 16000 },
+      { position: 4, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+      { position: 5, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+      { position: 6, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+      { position: 7, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+      { position: 8, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+      { position: 9, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+      { position: 10, type: 'free_ticket', amount: 0, ticket: `FT-${generateId()}` },
+    ];
+
+    for (const prize of prizeDistribution) {
+      blitzPrizesToCreate.push({
+        tournament_id: tournaments[2].id,
+        player_id: null, // Dummy
+        position: prize.position,
+        prize_type: prize.type,
+        amount: prize.amount,
+        ticket_code: prize.ticket || null,
+        distributed_at: new Date().toISOString(),
+      });
+    }
+
+    if (blitzPrizesToCreate.length > 0) {
+      const { error: prizeErr } = await supabase
+        .from('blitz_prizes')
+        .insert(blitzPrizesToCreate);
+
+      if (prizeErr) {
+        console.error('Blitz prizes error:', prizeErr);
+        // Continue anyway
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        packs_created: 3,
+        predictions_created: 3,
+        blitz_created: 3,
+        message: 'Seed data created successfully',
+        details: {
+          packs: packs.map((p) => ({ id: p.id, name: p.name, status: p.status })),
+          predictions: predictions.map((p) => ({ id: p.id, question: p.question, status: p.status })),
+          tournaments: tournaments.map((t) => ({ id: t.id, title: t.title, status: t.status })),
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Seed data error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to create seed data: ' + err.message });
+  }
+});
+
+// ─── EXPORT ───────────────────────────────────────────────────────────────────
+
 /**
  * GET /api/admin/export
  * Export full report as CSV.
