@@ -768,7 +768,7 @@ router.post('/:id/end', adminAuth, async (req, res) => {
 
 /**
  * GET /api/admin/games/:id/participants
- * Get all participants for a game
+ * Get all participants for a game (challenges, doors, predictions)
  */
 router.get('/:id/participants', adminAuth, async (req, res) => {
   try {
@@ -776,17 +776,57 @@ router.get('/:id/participants', adminAuth, async (req, res) => {
     const { page = 1, limit = 20 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    // Try challenge first
+    // Try prediction first
+    const { data: prediction } = await supabase.from('predictions').select('id').eq('id', id).single();
+
+    if (prediction) {
+      const { data, error, count } = await supabase
+        .from('prediction_participations')
+        .select(
+          `id, player_id, answer, is_correct, amount_won, submitted_at, created_at,
+           players (id, phone, name, email)`,
+          { count: 'exact' }
+        )
+        .eq('prediction_id', id)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + Number(limit) - 1);
+
+      if (error) {
+        return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
+      }
+
+      const participations = (data || []).map((p) => ({
+        id: p.id,
+        player_id: p.player_id,
+        player_phone: p.players?.phone || null,
+        player_name: p.players?.name || null,
+        answer: p.answer,
+        is_correct: p.is_correct,
+        amount_won: parseFloat(p.amount_won) || 0,
+        participated_at: p.created_at,
+        submitted_at: p.submitted_at,
+      }));
+
+      return res.json({
+        success: true,
+        data: {
+          participations,
+          total: count,
+          page: Number(page),
+          limit: Number(limit),
+        },
+      });
+    }
+
+    // Try challenge
     const { data: challenge } = await supabase.from('challenges').select('id').eq('id', id).single();
 
     if (challenge) {
       const { data, error, count } = await supabase
         .from('challenge_participations')
         .select(
-          `
-          id, player_id, player_answer, is_correct, amount_won, participated_at,
-          players (id, phone, name, email)
-        `,
+          `id, player_id, player_answer, is_correct, amount_won, participated_at,
+           players (id, phone, name, email)`,
           { count: 'exact' }
         )
         .eq('challenge_id', id)
@@ -814,10 +854,8 @@ router.get('/:id/participants', adminAuth, async (req, res) => {
       const { data, error, count } = await supabase
         .from('game_sessions')
         .select(
-          `
-          id, player_id, status, player_answer, prize, played_at,
-          players (id, phone, name, email)
-        `,
+          `id, player_id, status, player_answer, prize, played_at,
+           players (id, phone, name, email)`,
           { count: 'exact' }
         )
         .eq('door_id', doorId)
