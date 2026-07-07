@@ -446,6 +446,120 @@ router.post('/kill-switch', async (req, res) => {
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 
 /**
+ * GET /api/admin/analytics/overview
+ * Unified analytics overview for the dashboard analytics page.
+ * Query: ?period=today|7days|30days (default: 7days)
+ */
+router.get('/analytics/overview', async (req, res) => {
+  try {
+    const { period = '7days' } = req.query;
+
+    // Calculate since date based on period
+    const now = new Date();
+    let since;
+    if (period === 'today') {
+      since = new Date(now);
+      since.setHours(0, 0, 0, 0);
+    } else if (period === '30days') {
+      since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    } else {
+      // default: 7days
+      since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    }
+    const sinceISO = since.toISOString();
+
+    // Run all queries in parallel
+    const [
+      transactionsRes,
+      withdrawalsRes,
+      allPlayersRes,
+      newPlayersRes,
+      pillPlaysRes,
+      predictionEntriesRes,
+      blitzRegsRes,
+      gameSessionsRes,
+    ] = await Promise.all([
+      supabase.from('transactions').select('type, amount').gte('created_at', sinceISO),
+      supabase.from('withdrawal_requests').select('status, amount'),
+      supabase.from('players').select('id', { count: 'exact', head: true }),
+      supabase.from('players').select('id', { count: 'exact', head: true }).gte('created_at', sinceISO),
+      supabase.from('pill_plays').select('id', { count: 'exact', head: true }).gte('created_at', sinceISO),
+      supabase.from('prediction_participations').select('id', { count: 'exact', head: true }).gte('created_at', sinceISO),
+      supabase.from('blitz_registrations').select('id', { count: 'exact', head: true }).gte('registered_at', sinceISO),
+      supabase.from('game_sessions').select('player_id', { count: 'exact' }).gte('played_at', sinceISO),
+    ]);
+
+    // ── Money metrics ─────────────────────────────────────────────────────
+    const transactions = transactionsRes.data || [];
+
+    const totalRevenue = transactions
+      .filter((t) => ['prediction_enter', 'pill_play', 'blitz_register', 'entry_fee'].includes(t.type))
+      .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    const totalPayouts = transactions
+      .filter((t) => ['prediction_win', 'pill_win', 'blitz_prize', 'prize'].includes(t.type))
+      .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    const allWithdrawals = withdrawalsRes.data || [];
+    const pendingWithdrawalValue = allWithdrawals
+      .filter((w) => w.status === 'pending')
+      .reduce((sum, w) => sum + (w.amount || 0), 0);
+
+    // ── Player metrics ────────────────────────────────────────────────────
+    const totalRegistered = allPlayersRes.count || 0;
+    const newThisPeriod = newPlayersRes.count || 0;
+    const gameSessions = gameSessionsRes.data || [];
+    const activeThisPeriod = new Set(gameSessions.map((s) => s.player_id).filter(Boolean)).size;
+
+    // ── Game metrics ──────────────────────────────────────────────────────
+    const pillsPlayed = pillPlaysRes.count || 0;
+    const predictionsEntered = predictionEntriesRes.count || 0;
+    const blitzRegistrations = blitzRegsRes.count || 0;
+    const doorPlays = gameSessionsRes.count || 0;
+    const totalPlays = pillsPlayed + predictionsEntered + blitzRegistrations + doorPlays;
+
+    // ── Withdrawal metrics ────────────────────────────────────────────────
+    const totalRequested = allWithdrawals.length;
+    const totalApproved = allWithdrawals.filter((w) => w.status === 'approved').length;
+    const totalPending = allWithdrawals.filter((w) => w.status === 'pending').length;
+    const totalRejected = allWithdrawals.filter((w) => w.status === 'rejected').length;
+
+    return res.json({
+      success: true,
+      data: {
+        period,
+        money: {
+          total_revenue: totalRevenue,
+          total_payouts: totalPayouts,
+          net_profit: totalRevenue - totalPayouts,
+          pending_withdrawal_value: pendingWithdrawalValue,
+        },
+        players: {
+          total_registered: totalRegistered,
+          new_this_period: newThisPeriod,
+          active_this_period: activeThisPeriod,
+        },
+        games: {
+          pills_played: pillsPlayed,
+          predictions_entered: predictionsEntered,
+          blitz_registrations: blitzRegistrations,
+          total_plays: totalPlays,
+        },
+        withdrawals: {
+          total_requested: totalRequested,
+          total_approved: totalApproved,
+          total_pending: totalPending,
+          total_rejected: totalRejected,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Analytics overview error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch analytics overview' });
+  }
+});
+
+/**
  * GET /api/admin/analytics/revenue
  * Hourly or daily revenue data.
  * Query: ?period=daily|hourly&days=7
