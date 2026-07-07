@@ -220,6 +220,39 @@ router.post('/submit', auth, async (req, res) => {
 });
 
 /**
+ * GET /api/predictions/my-answer/:id
+ * Returns the authenticated player's submitted answer for a prediction
+ */
+router.get('/my-answer/:id', auth, async (req, res) => {
+  try {
+    const { id: predictionId } = req.params;
+    const player = req.player;
+
+    const { data: participation, error } = await supabase
+      .from('prediction_participations')
+      .select('answer, submitted_at')
+      .eq('prediction_id', predictionId)
+      .eq('player_id', player.id)
+      .single();
+
+    if (error || !participation) {
+      return res.status(404).json({ success: false, error: 'Not participated' });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        answer: participation.answer,
+        submitted_at: participation.submitted_at,
+      },
+    });
+  } catch (err) {
+    console.error('Get my-answer error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch answer' });
+  }
+});
+
+/**
  * GET /api/predictions/result/:id
  * Get result of a prediction (only if admin has marked the answer)
  * Returns 404 cleanly if answer not revealed yet — no "Not participated" banner
