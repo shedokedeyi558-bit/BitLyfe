@@ -1031,8 +1031,8 @@ router.post('/:id/reveal-answer', adminAuth, async (req, res) => {
           game_type: 'predictions',
           correct_answer,
           total_participants: participations?.length || 0,
-          winners: winnersCount,
-          total_prize_paid: winnersCount * prizePerWinner,
+          total_correct: winnersCount,
+          total_paid: winnersCount * prizePerWinner,
         },
       });
     }

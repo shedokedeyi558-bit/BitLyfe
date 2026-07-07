@@ -8,7 +8,7 @@ const router = express.Router();
 
 /**
  * GET /api/predictions/active
- * Returns active (and locked) predictions with countdown remaining
+ * Returns all predictions visible to players: active, locked, completed
  */
 router.get('/active', auth, async (req, res) => {
   try {
@@ -17,8 +17,8 @@ router.get('/active', auth, async (req, res) => {
     const { data: predictions, error } = await supabase
       .from('predictions')
       .select('id, question, category, entry_fee, prize_per_winner, max_participants, current_participants, countdown_end_time, status')
-      .in('status', ['active', 'locked'])
-      .order('countdown_end_time', { ascending: true });
+      .in('status', ['active', 'locked', 'completed'])
+      .order('countdown_end_time', { ascending: false });
 
     if (error) {
       return res.status(500).json({ success: false, error: 'Failed to fetch predictions' });
@@ -260,13 +260,6 @@ router.get('/result/:id', auth, async (req, res) => {
     const won = participation.is_correct === true;
     const amountWon = parseFloat(participation.amount_won) || 0;
 
-    // Get fresh player balance
-    const { data: freshPlayer } = await supabase
-      .from('players')
-      .select('balance')
-      .eq('id', player.id)
-      .single();
-
     return res.json({
       success: true,
       data: {
@@ -274,7 +267,6 @@ router.get('/result/:id', auth, async (req, res) => {
         correctAnswer: prediction.correct_answer,
         yourAnswer: participation.answer,
         prize: amountWon,
-        newBalance: parseFloat(freshPlayer?.balance || 0),
       },
     });
   } catch (err) {
