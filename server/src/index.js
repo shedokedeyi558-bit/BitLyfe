@@ -30,9 +30,12 @@ app.use(
     origin: [
       process.env.FRONTEND_URL || 'http://localhost:3000',
       'https://bitlyf.vercel.app',
-      'http://localhost:3000'
+      'https://bitlyfe.vercel.app',
+      'http://localhost:3000',
     ],
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
   })
 );
 
@@ -135,15 +138,17 @@ app.use('/api/game', gameRoutes);
 app.use('/api/pills', gameLimiter, pillsRoutes);
 app.use('/api/predictions', gameLimiter, predictionsRoutes);
 app.use('/api/blitz', gameLimiter, blitzRoutes);
+// Admin subroutes BEFORE generic /api/admin so they aren't shadowed
 app.use('/api/admin/games', gamesRoutes);
 app.use('/api/admin/pills', adminPillsRoutes);
 app.use('/api/admin/predictions', adminPredictionsRoutes);
 app.use('/api/admin/blitz', adminBlitzRoutes);
-app.use('/api/wallet', walletRoutes);
-app.use('/api/admin', adminRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);
-app.use('/api/challenges', challengeRoutes);
 app.use('/api/admin/challenges', challengeRoutes);
+// Generic admin router (stats, players, settings, analytics, seed, export, etc.)
+app.use('/api/admin', adminRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/challenges', challengeRoutes);
 
 // ─── Paystack Webhook ─────────────────────────────────────────────────────────
 
