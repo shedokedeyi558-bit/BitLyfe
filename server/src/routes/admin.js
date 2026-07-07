@@ -454,19 +454,41 @@ router.get('/analytics/overview', async (req, res) => {
   try {
     const { period = '7days' } = req.query;
 
-    // Calculate since date based on period
+    // Calculate since/until dates based on period
     const now = new Date();
     let since;
+    let until = null; // null means "up to now"
+
     if (period === 'today') {
       since = new Date(now);
       since.setHours(0, 0, 0, 0);
     } else if (period === '30days') {
       since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    } else if (period === '7days') {
+      since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (period.startsWith('day:')) {
+      // e.g. day:2026-07-07
+      const dateStr = period.slice(4); // "2026-07-07"
+      since = new Date(`${dateStr}T00:00:00.000Z`);
+      until = new Date(`${dateStr}T23:59:59.999Z`);
+    } else if (period.startsWith('month:')) {
+      // e.g. month:2026-07
+      const [year, month] = period.slice(6).split('-').map(Number);
+      since = new Date(Date.UTC(year, month - 1, 1));           // first day of month
+      until = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999)); // last day of month
     } else {
-      // default: 7days
+      // fallback: 7days
       since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     }
+
     const sinceISO = since.toISOString();
+    const untilISO = until ? until.toISOString() : now.toISOString();
+
+    // Helper to apply date range to a supabase query
+    const withRange = (query, col = 'created_at') =>
+      until
+        ? query.gte(col, sinceISO).lte(col, untilISO)
+        : query.gte(col, sinceISO);
 
     // Run all queries in parallel
     const [
@@ -479,14 +501,14 @@ router.get('/analytics/overview', async (req, res) => {
       blitzRegsRes,
       gameSessionsRes,
     ] = await Promise.all([
-      supabase.from('transactions').select('type, amount').gte('created_at', sinceISO),
+      withRange(supabase.from('transactions').select('type, amount')),
       supabase.from('withdrawal_requests').select('status, amount'),
       supabase.from('players').select('id', { count: 'exact', head: true }),
-      supabase.from('players').select('id', { count: 'exact', head: true }).gte('created_at', sinceISO),
-      supabase.from('pill_plays').select('id', { count: 'exact', head: true }).gte('created_at', sinceISO),
-      supabase.from('prediction_participations').select('id', { count: 'exact', head: true }).gte('created_at', sinceISO),
-      supabase.from('blitz_registrations').select('id', { count: 'exact', head: true }).gte('registered_at', sinceISO),
-      supabase.from('game_sessions').select('player_id', { count: 'exact' }).gte('played_at', sinceISO),
+      withRange(supabase.from('players').select('id', { count: 'exact', head: true })),
+      withRange(supabase.from('pill_plays').select('id', { count: 'exact', head: true })),
+      withRange(supabase.from('prediction_participations').select('id', { count: 'exact', head: true })),
+      withRange(supabase.from('blitz_registrations').select('id', { count: 'exact', head: true }), 'registered_at'),
+      withRange(supabase.from('game_sessions').select('player_id', { count: 'exact' }), 'played_at'),
     ]);
 
     // ── Money metrics ─────────────────────────────────────────────────────
