@@ -500,6 +500,7 @@ router.get('/analytics/overview', async (req, res) => {
       predictionEntriesRes,
       blitzRegsRes,
       gameSessionsRes,
+      gameSessionsCountRes,
     ] = await Promise.all([
       withRange(supabase.from('transactions').select('type, amount')),
       supabase.from('withdrawal_requests').select('status, amount'),
@@ -508,7 +509,10 @@ router.get('/analytics/overview', async (req, res) => {
       withRange(supabase.from('pill_plays').select('id', { count: 'exact', head: true })),
       withRange(supabase.from('prediction_participations').select('id', { count: 'exact', head: true })),
       withRange(supabase.from('blitz_registrations').select('id', { count: 'exact', head: true }), 'registered_at'),
-      withRange(supabase.from('game_sessions').select('player_id', { count: 'exact' }), 'played_at'),
+      // fetch player_ids for active_this_period calculation
+      withRange(supabase.from('game_sessions').select('player_id'), 'played_at'),
+      // separate count query
+      withRange(supabase.from('game_sessions').select('id', { count: 'exact', head: true }), 'played_at'),
     ]);
 
     // ── Money metrics ─────────────────────────────────────────────────────
@@ -537,7 +541,7 @@ router.get('/analytics/overview', async (req, res) => {
     const pillsPlayed = pillPlaysRes.count || 0;
     const predictionsEntered = predictionEntriesRes.count || 0;
     const blitzRegistrations = blitzRegsRes.count || 0;
-    const doorPlays = gameSessionsRes.count || 0;
+    const doorPlays = gameSessionsCountRes.count || 0;
     const totalPlays = pillsPlayed + predictionsEntered + blitzRegistrations + doorPlays;
 
     // ── Withdrawal metrics ────────────────────────────────────────────────
