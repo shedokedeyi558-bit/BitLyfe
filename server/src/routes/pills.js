@@ -256,6 +256,12 @@ router.post('/submit', auth, async (req, res) => {
     const correct = checkAnswer(pill, String(answer));
     const prize = parseFloat(pill.prize);
 
+    // Mark pill as played in the pills table immediately
+    await supabase
+      .from('pills')
+      .update({ status: 'played' })
+      .eq('id', pillId);
+
     if (correct) {
       // Fetch fresh player balance
       const { data: freshPlayer } = await supabase
@@ -278,26 +284,25 @@ router.post('/submit', auth, async (req, res) => {
       // Mark play as won
       await supabase.from('pill_plays').update({ won: true }).eq('id', play.id);
 
-      // Auto-deactivate pack if all pills in it have now been played by someone
+      // Auto-deactivate pack if all pills in it are now played
       if (pill.pack_id) {
-        const { data: packPills } = await supabase
+        const { count: totalCount } = await supabase
           .from('pills')
-          .select('id')
+          .select('id', { count: 'exact', head: true })
           .eq('pack_id', pill.pack_id)
           .neq('status', 'expired');
 
-        if (packPills && packPills.length > 0) {
-          const { count: playedCount } = await supabase
-            .from('pill_plays')
-            .select('id', { count: 'exact', head: true })
-            .in('pill_id', packPills.map((p) => p.id));
+        const { count: playedCount } = await supabase
+          .from('pills')
+          .select('id', { count: 'exact', head: true })
+          .eq('pack_id', pill.pack_id)
+          .eq('status', 'played');
 
-          if (playedCount >= packPills.length) {
-            await supabase
-              .from('pill_packs')
-              .update({ status: 'inactive' })
-              .eq('id', pill.pack_id);
-          }
+        if (totalCount > 0 && playedCount >= totalCount) {
+          await supabase
+            .from('pill_packs')
+            .update({ status: 'inactive' })
+            .eq('id', pill.pack_id);
         }
       }
 
@@ -314,24 +319,23 @@ router.post('/submit', auth, async (req, res) => {
 
     // Wrong answer — still check if pack should be deactivated
     if (pill.pack_id) {
-      const { data: packPills } = await supabase
+      const { count: totalCount } = await supabase
         .from('pills')
-        .select('id')
+        .select('id', { count: 'exact', head: true })
         .eq('pack_id', pill.pack_id)
         .neq('status', 'expired');
 
-      if (packPills && packPills.length > 0) {
-        const { count: playedCount } = await supabase
-          .from('pill_plays')
-          .select('id', { count: 'exact', head: true })
-          .in('pill_id', packPills.map((p) => p.id));
+      const { count: playedCount } = await supabase
+        .from('pills')
+        .select('id', { count: 'exact', head: true })
+        .eq('pack_id', pill.pack_id)
+        .eq('status', 'played');
 
-        if (playedCount >= packPills.length) {
-          await supabase
-            .from('pill_packs')
-            .update({ status: 'inactive' })
-            .eq('id', pill.pack_id);
-        }
+      if (totalCount > 0 && playedCount >= totalCount) {
+        await supabase
+          .from('pill_packs')
+          .update({ status: 'inactive' })
+          .eq('id', pill.pack_id);
       }
     }
 

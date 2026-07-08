@@ -41,10 +41,16 @@ router.get('/packs', async (req, res) => {
       pillsByPack[pill.pack_id].push(pill);
     }
 
-    const result = (packs || []).map((pack) => ({
-      ...pack,
-      pills: pillsByPack[pack.id] || [],
-    }));
+    const result = (packs || []).map((pack) => {
+      const packPills = pillsByPack[pack.id] || [];
+      return {
+        ...pack,
+        pills: packPills,
+        available_count: packPills.filter((p) => p.status === 'available').length,
+        played_count: packPills.filter((p) => p.status === 'played').length,
+        expired_count: packPills.filter((p) => p.status === 'expired').length,
+      };
+    });
 
     return res.json({ success: true, data: { packs: result } });
   } catch (err) {
