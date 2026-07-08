@@ -1,3 +1,4 @@
+const { createNotification } = require('./notifications');
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
@@ -142,6 +143,14 @@ router.put('/:id/approve', async (req, res) => {
       reference: transferReference,
     });
 
+    // Notify player
+    await createNotification(
+      withdrawal.player_id,
+      'withdrawal_approved',
+      'Withdrawal approved',
+      `₦${withdrawal.amount.toLocaleString()} is on its way to your account`
+    );
+
     return res.json({
       success: true,
       data: {
@@ -217,6 +226,14 @@ router.put('/:id/reject', async (req, res) => {
       amount: withdrawal.amount,
       description: `Withdrawal rejected: ${reason || 'Rejected by admin'}`,
     });
+
+    // Notify player
+    await createNotification(
+      withdrawal.player_id,
+      'withdrawal_rejected',
+      'Withdrawal rejected',
+      reason || 'Your withdrawal request was rejected by admin'
+    );
 
     return res.json({
       success: true,

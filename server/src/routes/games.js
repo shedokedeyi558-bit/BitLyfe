@@ -1,4 +1,5 @@
 const express = require('express');
+const { createNotification } = require('./notifications');
 const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const adminAuth = require('../middleware/adminAuth');
@@ -1015,6 +1016,21 @@ router.post('/:id/reveal-answer', adminAuth, async (req, res) => {
             amount: prizePerWinner,
             description: `Won prediction: ${prediction.question.substring(0, 50)}`,
           });
+          // Notify winner
+          await createNotification(
+            part.player_id,
+            'win',
+            'Prediction correct! 🎉',
+            `₦${prizePerWinner.toLocaleString()} has been added to your wallet`
+          );
+        } else {
+          // Notify loser with result
+          await createNotification(
+            part.player_id,
+            'prediction_result',
+            'Result revealed',
+            `Correct answer was: ${correct_answer}`
+          );
         }
       }
 

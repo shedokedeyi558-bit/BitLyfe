@@ -16,6 +16,7 @@ const pillsRoutes = require('./routes/pills');
 const predictionsRoutes = require('./routes/predictions');
 const adminPillsRoutes = require('./routes/adminPills');
 const adminPredictionsRoutes = require('./routes/adminPredictions');
+const notificationsRoutes = require('./routes/notifications');
 const blitzRoutes = require('./routes/blitz');
 const adminBlitzRoutes = require('./routes/adminBlitz');
 const supabase = require('./db/supabase');
@@ -137,6 +138,7 @@ app.use('/api/game/submit', gameLimiter);
 app.use('/api/game', gameRoutes);
 app.use('/api/pills', gameLimiter, pillsRoutes);
 app.use('/api/predictions', gameLimiter, predictionsRoutes);
+app.use('/api/notifications', notificationsRoutes);
 app.use('/api/blitz', gameLimiter, blitzRoutes);
 // Admin subroutes BEFORE generic /api/admin so they aren't shadowed
 app.use('/api/admin/games', gamesRoutes);

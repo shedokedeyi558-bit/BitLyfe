@@ -1,3 +1,4 @@
+const { createNotifications } = require('./notifications');
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
@@ -247,6 +248,18 @@ router.post('/:id/publish', async (req, res) => {
     }
 
     const { data } = await supabase.from('blitz_tournaments').update({ status: 'registration' }).eq('id', id).select().single();
+
+    // Notify all players about new tournament
+    const { data: allPlayers } = await supabase.from('players').select('id');
+    if (allPlayers && allPlayers.length > 0) {
+      await createNotifications(allPlayers.map((p) => ({
+        player_id: p.id,
+        type: 'new_event',
+        title: 'New Blitz Tournament! ⚡',
+        message: `${data.title} — Register now`,
+      })));
+    }
+
     return res.json({ success: true, data: { tournament: data } });
   } catch (err) {
     console.error('Publish blitz error:', err);

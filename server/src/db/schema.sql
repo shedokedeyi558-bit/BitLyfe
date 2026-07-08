@@ -357,7 +357,22 @@ CREATE INDEX IF NOT EXISTS idx_pills_status ON pills(status);
 CREATE INDEX IF NOT EXISTS idx_pills_admin_id ON pills(admin_id);
 CREATE INDEX IF NOT EXISTS idx_pills_category ON pills(category);
 
--- ─── PREDICTIONS TABLE ────────────────────────────────────────────────────────
+-- ─── NOTIFICATIONS TABLE ────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  type TEXT CHECK (type IN ('win', 'loss', 'new_event', 'withdrawal_approved', 'withdrawal_rejected', 'blitz_starting', 'prediction_result')) NOT NULL,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  read BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_player_id ON notifications(player_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(player_id, read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
+
 
 CREATE TABLE IF NOT EXISTS predictions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

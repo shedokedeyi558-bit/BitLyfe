@@ -1,3 +1,4 @@
+const { createNotification } = require('./notifications');
 const express = require('express');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
@@ -283,6 +284,9 @@ router.post('/submit', auth, async (req, res) => {
 
       // Mark play as won
       await supabase.from('pill_plays').update({ won: true }).eq('id', play.id);
+
+      // Notify player
+      await createNotification(player.id, 'win', 'You won! 🎉', `₦${prize.toLocaleString()} has been credited to your wallet`);
 
       // Auto-deactivate pack if all pills in it are now played
       if (pill.pack_id) {
