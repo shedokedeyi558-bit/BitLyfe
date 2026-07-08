@@ -30,13 +30,13 @@ router.get('/packs', auth, async (req, res) => {
       return res.json({ success: true, data: { packs: [] } });
     }
 
-    // Fetch all non-expired pills for these packs
+    // Fetch only available pills for these packs
     const packIds = packs.map((p) => p.id);
     const { data: pills, error: pillsErr } = await supabase
       .from('pills')
       .select('id, pack_id, color, entry_fee, prize, status')
       .in('pack_id', packIds)
-      .neq('status', 'expired');
+      .eq('status', 'available');
 
     if (pillsErr) {
       return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
@@ -69,7 +69,7 @@ router.get('/packs', auth, async (req, res) => {
       });
     }
 
-    // Only return packs where at least one pill is available (not played by this player)
+    // Only return packs where at least one pill hasn't been played by this player
     const result = packs
       .map((pack) => ({
         id: pack.id,
