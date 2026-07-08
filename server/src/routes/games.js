@@ -55,6 +55,7 @@ function formatPrediction(prediction) {
     category: prediction.category,
     status: prediction.status,
     entry_fee: Number(prediction.entry_fee),
+    fee: Number(prediction.entry_fee),
     prize_per_winner: Number(prediction.prize_per_winner),
     max_slots: prediction.max_participants,
     slots_filled: prediction.current_participants,
@@ -62,6 +63,7 @@ function formatPrediction(prediction) {
     countdown_remaining_seconds: Math.max(0, Math.floor((countdownEnd - now) / 1000)),
     answer_revealed_at: prediction.answer_revealed_at || null,
     correct_answer: prediction.correct_answer || null,
+    event_date: prediction.event_date || null,
     created_at: prediction.created_at,
     stats: {
       total_players: prediction.current_participants,
@@ -287,7 +289,7 @@ router.post('/create', adminAuth, async (req, res) => {
 
     // ── PREDICTIONS ────────────────────────────────────────────────────────
     if (game_type === 'predictions') {
-      const { title, question, category, entry_fee, prize_per_winner, max_slots, countdown_end } = gameData;
+      const { title, question, category, entry_fee, prize_per_winner, max_slots, countdown_end, event_date } = gameData;
 
       const questionText = question || title;
       if (!questionText || entry_fee === undefined || prize_per_winner === undefined || !countdown_end) {
@@ -316,6 +318,7 @@ router.post('/create', adminAuth, async (req, res) => {
           current_participants: 0,
           countdown_seconds: countdownSeconds,
           countdown_end_time: countdownEnd.toISOString(),
+          event_date: event_date ? new Date(event_date).toISOString() : null,
           status: 'active',
         })
         .select()

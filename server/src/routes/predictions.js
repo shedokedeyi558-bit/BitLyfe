@@ -16,7 +16,7 @@ router.get('/active', auth, async (req, res) => {
 
     const { data: predictions, error } = await supabase
       .from('predictions')
-      .select('id, question, category, entry_fee, prize_per_winner, max_participants, current_participants, countdown_end_time, status')
+      .select('id, question, category, entry_fee, prize_per_winner, max_participants, current_participants, countdown_end_time, status, event_date')
       .in('status', ['active', 'locked', 'completed'])
       .order('countdown_end_time', { ascending: false });
 
@@ -40,6 +40,7 @@ router.get('/active', auth, async (req, res) => {
         countdown_end: p.countdown_end_time,
         countdown_remaining_seconds: remaining,
         status: p.status,
+        event_date: p.event_date || null,
       };
     });
 

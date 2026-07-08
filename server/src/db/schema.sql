@@ -385,6 +385,7 @@ CREATE TABLE IF NOT EXISTS predictions (
   current_participants INTEGER DEFAULT 0,
   countdown_seconds INTEGER NOT NULL,
   countdown_end_time TIMESTAMP WITH TIME ZONE NOT NULL,
+  event_date TIMESTAMP WITH TIME ZONE,
   correct_answer TEXT,
   status TEXT CHECK (status IN ('active', 'locked', 'completed', 'cancelled')) DEFAULT 'active',
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
