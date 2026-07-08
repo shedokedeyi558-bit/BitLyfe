@@ -7,7 +7,7 @@ const router = express.Router();
 
 /**
  * GET /api/pills/packs
- * Returns all active packs with their pills.
+ * Returns active packs that have at least one available pill.
  * Each pill shows status "played" if this player already played it.
  * Does NOT expose question, options, or correct_answer.
  */
@@ -30,7 +30,7 @@ router.get('/packs', auth, async (req, res) => {
       return res.json({ success: true, data: { packs: [] } });
     }
 
-    // Fetch all pills for these packs (no sensitive fields)
+    // Fetch all non-expired pills for these packs
     const packIds = packs.map((p) => p.id);
     const { data: pills, error: pillsErr } = await supabase
       .from('pills')
@@ -69,13 +69,16 @@ router.get('/packs', auth, async (req, res) => {
       });
     }
 
-    const result = packs.map((pack) => ({
-      id: pack.id,
-      name: pack.name,
-      category: pack.category,
-      status: pack.status,
-      pills: pillsByPack[pack.id] || [],
-    }));
+    // Only return packs where at least one pill is available (not played by this player)
+    const result = packs
+      .map((pack) => ({
+        id: pack.id,
+        name: pack.name,
+        category: pack.category,
+        status: pack.status,
+        pills: pillsByPack[pack.id] || [],
+      }))
+      .filter((pack) => pack.pills.some((pill) => pill.status === 'available'));
 
     return res.json({ success: true, data: { packs: result } });
   } catch (err) {
@@ -275,6 +278,29 @@ router.post('/submit', auth, async (req, res) => {
       // Mark play as won
       await supabase.from('pill_plays').update({ won: true }).eq('id', play.id);
 
+      // Auto-deactivate pack if all pills in it have now been played by someone
+      if (pill.pack_id) {
+        const { data: packPills } = await supabase
+          .from('pills')
+          .select('id')
+          .eq('pack_id', pill.pack_id)
+          .neq('status', 'expired');
+
+        if (packPills && packPills.length > 0) {
+          const { count: playedCount } = await supabase
+            .from('pill_plays')
+            .select('id', { count: 'exact', head: true })
+            .in('pill_id', packPills.map((p) => p.id));
+
+          if (playedCount >= packPills.length) {
+            await supabase
+              .from('pill_packs')
+              .update({ status: 'inactive' })
+              .eq('id', pill.pack_id);
+          }
+        }
+      }
+
       return res.json({
         success: true,
         data: {
@@ -284,6 +310,29 @@ router.post('/submit', auth, async (req, res) => {
           newBalance: newBalance,
         },
       });
+    }
+
+    // Wrong answer — still check if pack should be deactivated
+    if (pill.pack_id) {
+      const { data: packPills } = await supabase
+        .from('pills')
+        .select('id')
+        .eq('pack_id', pill.pack_id)
+        .neq('status', 'expired');
+
+      if (packPills && packPills.length > 0) {
+        const { count: playedCount } = await supabase
+          .from('pill_plays')
+          .select('id', { count: 'exact', head: true })
+          .in('pill_id', packPills.map((p) => p.id));
+
+        if (playedCount >= packPills.length) {
+          await supabase
+            .from('pill_packs')
+            .update({ status: 'inactive' })
+            .eq('id', pill.pack_id);
+        }
+      }
     }
 
     return res.json({
