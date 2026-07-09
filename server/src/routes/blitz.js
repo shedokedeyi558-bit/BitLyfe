@@ -136,8 +136,9 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 /**
+/**
  * POST /api/blitz/:id/register
- * Register player for tournament. Deducts entry fee or validates free ticket.
+ * Register player for tournament. Deducts entry fee or validates free ticket from blitz_tickets.
  * Body: { ticket_code? }
  */
 router.post('/:id/register', auth, async (req, res) => {
@@ -169,35 +170,44 @@ router.post('/:id/register', auth, async (req, res) => {
     if (existing) return res.status(409).json({ success: false, error: 'Already registered for this tournament' });
 
     let entryFeePaid = tournament.entry_fee;
-    let usedTicket = null;
+    let usedTicketId = null;
 
     if (ticket_code) {
-      // Validate free ticket
+      // Validate free ticket from blitz_tickets table
       const { data: ticket } = await supabase
-        .from('blitz_prizes')
-        .select('id, ticket_code, prize_type, player_id, distributed_at')
+        .from('blitz_tickets')
+        .select('id, expires_at, status, player_id')
         .eq('ticket_code', ticket_code)
-        .eq('prize_type', 'free_ticket')
         .single();
 
-      if (!ticket) return res.status(400).json({ success: false, error: 'Invalid ticket code' });
+      if (!ticket) {
+        return res.status(404).json({ success: false, code: 'TICKET_NOT_FOUND', error: 'Ticket not found' });
+      }
 
       // Check ticket ownership
       if (ticket.player_id !== player.id) {
-        return res.status(403).json({ success: false, error: 'This ticket does not belong to you' });
+        return res.status(403).json({ success: false, code: 'TICKET_NOT_OWNER', error: 'This ticket does not belong to you' });
       }
 
-      // Check if already used (a ticket used = a registration with that ticket code exists)
-      const { data: usedCheck } = await supabase
-        .from('blitz_registrations')
-        .select('id')
-        .eq('ticket', ticket_code)
-        .single();
+      // Check expiration and update if needed (lazy-check)
+      const now = new Date();
+      if (new Date(ticket.expires_at) < now && ticket.status === 'unused') {
+        await supabase.from('blitz_tickets').update({ status: 'expired' }).eq('id', ticket.id);
+        return res.status(410).json({ success: false, code: 'TICKET_EXPIRED', error: 'Ticket has expired' });
+      }
 
-      if (usedCheck) return res.status(409).json({ success: false, error: 'Ticket already used' });
+      // Check if already used
+      if (ticket.status === 'used') {
+        return res.status(409).json({ success: false, code: 'TICKET_ALREADY_USED', error: 'Ticket has already been used' });
+      }
+
+      // Check if expired
+      if (ticket.status === 'expired') {
+        return res.status(410).json({ success: false, code: 'TICKET_EXPIRED', error: 'Ticket has expired' });
+      }
 
       entryFeePaid = 0;
-      usedTicket = ticket_code;
+      usedTicketId = ticket.id;
     } else {
       // Deduct entry fee from balance
       if (player.balance < tournament.entry_fee) {
@@ -222,8 +232,16 @@ router.post('/:id/register', auth, async (req, res) => {
       tournament_id: id,
       player_id: player.id,
       entry_fee_paid: entryFeePaid,
-      ticket: usedTicket,
+      ticket: ticket_code || null,
     });
+
+    // Mark ticket as used if one was provided
+    if (usedTicketId) {
+      await supabase
+        .from('blitz_tickets')
+        .update({ status: 'used', used_on_tournament_id: id })
+        .eq('id', usedTicketId);
+    }
 
     // Update total_registered and prize_pool
     const newTotal = (tournament.total_registered || 0) + 1;

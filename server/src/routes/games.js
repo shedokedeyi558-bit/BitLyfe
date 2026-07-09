@@ -1002,6 +1002,11 @@ router.post('/:id/reveal-answer', adminAuth, async (req, res) => {
       let winnersCount = 0;
 
       for (const part of participations || []) {
+        // Idempotency check: skip if already processed (is_correct is not null)
+        if (part.is_correct !== null) {
+          continue;
+        }
+
         const isCorrect = String(part.answer).toLowerCase().trim() === String(correct_answer).toLowerCase().trim();
 
         await supabase

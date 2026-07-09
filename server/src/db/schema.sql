@@ -334,6 +334,25 @@ CREATE INDEX IF NOT EXISTS idx_blitz_prizes_tournament_id ON blitz_prizes(tourna
 CREATE INDEX IF NOT EXISTS idx_blitz_prizes_player_id ON blitz_prizes(player_id);
 CREATE INDEX IF NOT EXISTS idx_blitz_prizes_ticket_code ON blitz_prizes(ticket_code);
 
+-- ─── BLITZ TICKETS TABLE ──────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS blitz_tickets (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+  source_tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE SET NULL,
+  ticket_code TEXT UNIQUE NOT NULL,
+  awarded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  status TEXT CHECK (status IN ('unused', 'used', 'expired')) DEFAULT 'unused',
+  used_on_tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE SET NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_blitz_tickets_player_id ON blitz_tickets(player_id);
+CREATE INDEX IF NOT EXISTS idx_blitz_tickets_ticket_code ON blitz_tickets(ticket_code);
+CREATE INDEX IF NOT EXISTS idx_blitz_tickets_status ON blitz_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_blitz_tickets_expires_at ON blitz_tickets(expires_at);
+
 -- ─── PILLS TABLE ───────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS pills (

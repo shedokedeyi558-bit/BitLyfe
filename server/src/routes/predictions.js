@@ -256,7 +256,7 @@ router.get('/my-answer/:id', auth, async (req, res) => {
 /**
  * GET /api/predictions/result/:id
  * Get result of a prediction (only if admin has marked the answer)
- * Returns 404 cleanly if answer not revealed yet — no "Not participated" banner
+ * Returns distinct 404 codes so frontend can distinguish between "not revealed yet" vs "didn't participate"
  */
 router.get('/result/:id', auth, async (req, res) => {
   try {
@@ -271,15 +271,10 @@ router.get('/result/:id', auth, async (req, res) => {
       .single();
 
     if (predErr || !prediction) {
-      return res.status(404).json({ success: false, error: 'Prediction not found' });
+      return res.status(404).json({ success: false, code: 'NOT_FOUND', error: 'Prediction not found' });
     }
 
-    // Check if admin has revealed the answer — return 404 if not yet
-    if (!prediction.correct_answer || prediction.status !== 'completed') {
-      return res.status(404).json({ success: false, error: 'Result not available yet' });
-    }
-
-    // Now check participation
+    // Check participation first (before checking if answer revealed)
     const { data: participation } = await supabase
       .from('prediction_participations')
       .select('*')
@@ -288,7 +283,12 @@ router.get('/result/:id', auth, async (req, res) => {
       .single();
 
     if (!participation) {
-      return res.status(404).json({ success: false, error: 'You did not participate in this prediction' });
+      return res.status(404).json({ success: false, code: 'NOT_PARTICIPANT', error: 'You did not participate in this prediction' });
+    }
+
+    // Now check if admin has revealed the answer
+    if (!prediction.correct_answer || prediction.status !== 'completed') {
+      return res.status(404).json({ success: false, code: 'NOT_REVEALED', error: 'Result not available yet' });
     }
 
     const won = participation.is_correct === true;
@@ -305,7 +305,7 @@ router.get('/result/:id', auth, async (req, res) => {
     });
   } catch (err) {
     console.error('Get prediction result error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to fetch prediction result' });
+    return res.status(500).json({ success: false, code: 'ERROR', error: 'Failed to fetch prediction result' });
   }
 });
 
