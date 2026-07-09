@@ -403,7 +403,7 @@ CREATE TABLE IF NOT EXISTS prediction_participations (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   prediction_id UUID REFERENCES predictions(id) ON DELETE CASCADE,
   player_id UUID REFERENCES players(id) ON DELETE CASCADE,
-  answer TEXT NOT NULL,
+  answer TEXT,
   is_correct BOOLEAN,
   amount_won DECIMAL(10, 2) DEFAULT 0,
   submitted_at TIMESTAMP WITH TIME ZONE,
