@@ -16,37 +16,64 @@ router.use(adminAuth);
 /**
  * GET /api/admin/stats
  * Returns: plays today, revenue today, payouts today, profit today
+ * Aggregates from pill_plays, prediction_participations, blitz_registrations, and transactions
  */
 router.get('/stats', async (req, res) => {
   try {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
 
-    const [playsRes, sessionsRes] = await Promise.all([
+    const startOfDayISO = startOfDay.toISOString();
+    const endOfDayISO = endOfDay.toISOString();
+
+    // ── Plays Today ────────────────────────────────────────────────────────
+    const [pillPlaysRes, predictionEntriesRes, blitzRegsRes] = await Promise.all([
       supabase
-        .from('game_sessions')
-        .select('id, status, entry_fee, prize', { count: 'exact' })
-        .gte('played_at', startOfDay.toISOString()),
+        .from('pill_plays')
+        .select('id', { count: 'exact', head: true })
+        .gte('created_at', startOfDayISO)
+        .lte('created_at', endOfDayISO),
       supabase
-        .from('game_sessions')
-        .select('entry_fee, prize, status')
-        .gte('played_at', startOfDay.toISOString()),
+        .from('prediction_participations')
+        .select('id', { count: 'exact', head: true })
+        .gte('created_at', startOfDayISO)
+        .lte('created_at', endOfDayISO),
+      supabase
+        .from('blitz_registrations')
+        .select('id', { count: 'exact', head: true })
+        .gte('registered_at', startOfDayISO)
+        .lte('registered_at', endOfDayISO),
     ]);
 
-    const sessions = sessionsRes.data || [];
-    const playsToday = playsRes.count || 0;
-    const revenueToday = sessions.reduce((sum, s) => sum + (s.entry_fee || 0), 0);
-    const payoutsToday = sessions
-      .filter((s) => s.status === 'won')
-      .reduce((sum, s) => sum + (s.prize || 0), 0);
+    const playsToday =
+      (pillPlaysRes.count || 0) + (predictionEntriesRes.count || 0) + (blitzRegsRes.count || 0);
+
+    // ── Revenue/Payouts Today ──────────────────────────────────────────────
+    const { data: transactionsRes } = await supabase
+      .from('transactions')
+      .select('type, amount')
+      .gte('created_at', startOfDayISO)
+      .lte('created_at', endOfDayISO);
+
+    const transactions = transactionsRes || [];
+
+    const revenueToday = transactions
+      .filter((t) => ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'].includes(t.type))
+      .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    const payoutsToday = transactions
+      .filter((t) => ['prediction_win', 'pill_win', 'blitz_prize', 'prize'].includes(t.type))
+      .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
     const profitToday = revenueToday - payoutsToday;
 
-    // Total players
+    // ── Total Players & Pending Withdrawals ────────────────────────────────
     const { count: totalPlayers } = await supabase
       .from('players')
       .select('id', { count: 'exact', head: true });
 
-    // Pending withdrawals
     const { count: pendingWithdrawals } = await supabase
       .from('withdrawal_requests')
       .select('id', { count: 'exact', head: true })
