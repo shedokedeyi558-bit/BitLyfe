@@ -6,6 +6,79 @@ const { checkAnswer } = require('../services/gameLogic');
 
 const router = express.Router();
 
+// ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
+
+/**
+ * Check if player's spend limits would be exceeded by a new charge
+ * Returns { allowed: boolean, reason?: string }
+ */
+async function checkSpendLimit(playerId, chargeAmount) {
+  const now = new Date();
+
+  // Calculate date ranges
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(now.getDate() - now.getDay());
+  startOfWeek.setHours(0, 0, 0, 0);
+
+  const startOfDayISO = startOfDay.toISOString();
+  const startOfWeekISO = startOfWeek.toISOString();
+  const nowISO = now.toISOString();
+
+  // Get player limits
+  const { data: limits } = await supabase
+    .from('player_limits')
+    .select('daily_limit, weekly_limit')
+    .eq('player_id', playerId)
+    .single();
+
+  if (!limits) {
+    return { allowed: true }; // No limits set
+  }
+
+  // Get today's spending
+  const { data: todayTxns } = await supabase
+    .from('transactions')
+    .select('amount')
+    .eq('player_id', playerId)
+    .in('type', ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'])
+    .gte('created_at', startOfDayISO)
+    .lte('created_at', nowISO);
+
+  const spentToday = (todayTxns || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+  // Check daily limit
+  if (limits.daily_limit && spentToday + chargeAmount > limits.daily_limit) {
+    return {
+      allowed: false,
+      reason: `Daily limit exceeded. Spent today: ₦${spentToday}, Limit: ₦${limits.daily_limit}`,
+    };
+  }
+
+  // Get this week's spending
+  const { data: weekTxns } = await supabase
+    .from('transactions')
+    .select('amount')
+    .eq('player_id', playerId)
+    .in('type', ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'])
+    .gte('created_at', startOfWeekISO)
+    .lte('created_at', nowISO);
+
+  const spentThisWeek = (weekTxns || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+  // Check weekly limit
+  if (limits.weekly_limit && spentThisWeek + chargeAmount > limits.weekly_limit) {
+    return {
+      allowed: false,
+      reason: `Weekly limit exceeded. Spent this week: ₦${spentThisWeek}, Limit: ₦${limits.weekly_limit}`,
+    };
+  }
+
+  return { allowed: true };
+}
+
 /**
  * GET /api/pills/packs
  * Returns active packs that have at least one available pill.
@@ -174,6 +247,12 @@ router.post('/open', auth, async (req, res) => {
     // Check balance
     if (player.balance < entryFee) {
       return res.status(402).json({ success: false, error: 'Insufficient balance' });
+    }
+
+    // Check spend limits
+    const limitCheck = await checkSpendLimit(player.id, entryFee);
+    if (!limitCheck.allowed) {
+      return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
     }
 
     // Deduct entry fee

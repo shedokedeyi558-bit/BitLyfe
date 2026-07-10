@@ -399,6 +399,18 @@ CREATE INDEX IF NOT EXISTS idx_notifications_player_id ON notifications(player_i
 CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(player_id, read);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
 
+-- ─── PLAYER SPEND LIMITS TABLE ────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS player_limits (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE UNIQUE,
+  daily_limit INTEGER,
+  weekly_limit INTEGER,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_player_limits_player_id ON player_limits(player_id);
+
 
 CREATE TABLE IF NOT EXISTS predictions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
