@@ -268,8 +268,15 @@ CREATE TABLE IF NOT EXISTS blitz_tournaments (
   tournament_end TIMESTAMP WITH TIME ZONE NOT NULL,
   status TEXT CHECK (status IN ('draft', 'registration', 'active', 'scoring', 'completed')) DEFAULT 'draft',
   total_registered INTEGER DEFAULT 0,
+  max_participants INTEGER NOT NULL DEFAULT 100,
+  min_participants INTEGER DEFAULT 1,
   prize_pool INTEGER DEFAULT 0,
   platform_cut_percent INTEGER DEFAULT 50,
+  cash_winner_count INTEGER DEFAULT 1,
+  payout_distribution JSONB NOT NULL DEFAULT '[100]',
+  total_payout_percent DECIMAL(5,2) DEFAULT 40.00,
+  ticket_tier_percent DECIMAL(5,2) DEFAULT 10.00,
+  guaranteed_minimum INTEGER,
   created_by UUID,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

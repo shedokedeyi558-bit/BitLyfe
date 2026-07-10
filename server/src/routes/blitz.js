@@ -136,6 +136,51 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 /**
+ * GET /api/blitz/:id/prize-estimate
+ * Live prize pool estimate based on current/max registration
+ */
+router.get('/:id/prize-estimate', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: tournament } = await supabase
+      .from('blitz_tournaments')
+      .select('id, entry_fee, max_participants, total_registered, cash_winner_count, total_payout_percent, ticket_tier_percent')
+      .eq('id', id)
+      .single();
+
+    if (!tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
+
+    const entryFee = Number(tournament.entry_fee || 0);
+    const maxParticipants = Number(tournament.max_participants || 100);
+    const currentRegistered = Number(tournament.total_registered || 0);
+    const cashWinnerCount = Number(tournament.cash_winner_count || 1);
+    const totalPayoutPercent = Number(tournament.total_payout_percent || 40);
+    const ticketTierPercent = Number(tournament.ticket_tier_percent || 10);
+
+    // Calculate prize pools
+    const maxPrizePool = Math.floor(maxParticipants * entryFee * (totalPayoutPercent / 100));
+    const currentEstimate = Math.floor(currentRegistered * entryFee * (totalPayoutPercent / 100));
+
+    return res.json({
+      success: true,
+      data: {
+        max_prize_pool: maxPrizePool,
+        current_estimate: currentEstimate,
+        current_registered: currentRegistered,
+        max_participants: maxParticipants,
+        cash_winner_count: cashWinnerCount,
+        total_payout_percent: totalPayoutPercent,
+        ticket_tier_percent: ticketTierPercent,
+      },
+    });
+  } catch (err) {
+    console.error('Get prize estimate error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch prize estimate' });
+  }
+});
+
+/**
 /**
  * POST /api/blitz/:id/register
  * Register player for tournament. Deducts entry fee or validates free ticket from blitz_tickets.
