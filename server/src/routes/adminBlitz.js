@@ -102,12 +102,18 @@ router.post('/', async (req, res) => {
     }
 
     // Validate percentages
-    if (total_payout_percent < 0 || total_payout_percent > 100) {
-      return res.status(400).json({ success: false, error: 'total_payout_percent must be between 0 and 100' });
+    if (total_payout_percent < 1 || total_payout_percent > 100) {
+      return res.status(400).json({ success: false, error: 'total_payout_percent must be between 1 and 100' });
     }
 
     if (ticket_tier_percent < 0 || ticket_tier_percent > 100) {
       return res.status(400).json({ success: false, error: 'ticket_tier_percent must be between 0 and 100' });
+    }
+
+    // Warn if leaving very little platform margin
+    let warning = null;
+    if (total_payout_percent > 90) {
+      warning = 'This leaves less than 10% platform margin';
     }
 
     const { data, error } = await supabase
@@ -138,7 +144,12 @@ router.post('/', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to create tournament: ' + error.message });
 
-    return res.status(201).json({ success: true, data: { tournament: data } });
+    const response = { success: true, data: { tournament: data } };
+    if (warning) {
+      response.warning = warning;
+    }
+
+    return res.status(201).json(response);
   } catch (err) {
     console.error('Create blitz error:', err);
     return res.status(500).json({ success: false, error: 'Failed to create tournament' });

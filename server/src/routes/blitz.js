@@ -166,7 +166,7 @@ router.get('/:id', auth, async (req, res) => {
 
     const { data: tournament, error } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, prize_pool, platform_cut_percent')
+      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, prize_pool')
       .eq('id', id)
       .single();
 
@@ -572,7 +572,7 @@ router.get('/:id/results', auth, async (req, res) => {
 
     const { data: tournament } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, status, prize_pool, platform_cut_percent, total_registered')
+      .select('id, title, status, prize_pool, total_registered')
       .eq('id', id)
       .single();
 
