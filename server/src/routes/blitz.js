@@ -42,7 +42,7 @@ async function checkSpendLimit(playerId, chargeAmount) {
     .from('transactions')
     .select('amount')
     .eq('player_id', playerId)
-    .in('type', ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'])
+    .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
     .gte('created_at', startOfDayISO)
     .lte('created_at', nowISO);
 
@@ -61,7 +61,7 @@ async function checkSpendLimit(playerId, chargeAmount) {
     .from('transactions')
     .select('amount')
     .eq('player_id', playerId)
-    .in('type', ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'])
+    .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
     .gte('created_at', startOfWeekISO)
     .lte('created_at', nowISO);
 

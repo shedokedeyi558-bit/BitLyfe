@@ -55,7 +55,7 @@ router.get('/spend-summary', auth, async (req, res) => {
       .from('transactions')
       .select('amount')
       .eq('player_id', player.id)
-      .in('type', ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'])
+      .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
       .gte('created_at', startOfDayISO)
       .lte('created_at', nowISO);
 
@@ -63,7 +63,7 @@ router.get('/spend-summary', auth, async (req, res) => {
       .from('transactions')
       .select('amount')
       .eq('player_id', player.id)
-      .in('type', ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'])
+      .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
       .gte('created_at', startOfWeekISO)
       .lte('created_at', nowISO);
 
@@ -256,16 +256,25 @@ router.get('/verify', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Payment reference is required' });
     }
 
-    // Check if already processed
+    // Idempotency: check if already processed (any terminal state for this reference)
     const { data: existing } = await supabase
       .from('transactions')
       .select('id, type')
       .eq('reference', reference)
-      .eq('type', 'deposit')
-      .single();
+      .in('type', ['deposit', 'deposit_settled'])
+      .maybeSingle();
 
     if (existing) {
-      return res.json({ success: true, data: { message: 'Payment already processed', alreadyProcessed: true } });
+      // Already successfully processed — fetch current balance and return
+      const { data: currentPlayer } = await supabase
+        .from('players')
+        .select('balance')
+        .eq('id', player.id)
+        .single();
+      return res.json({
+        success: true,
+        data: { message: 'Payment already processed', alreadyProcessed: true, newBalance: currentPlayer?.balance },
+      });
     }
 
     // Verify with Paystack
@@ -307,10 +316,10 @@ router.get('/verify', auth, async (req, res) => {
       reference,
     });
 
-    // Mark pending as done (optional cleanup)
+    // Remove the pending record so only one deposit entry appears in transaction history
     await supabase
       .from('transactions')
-      .update({ type: 'deposit_settled' })
+      .delete()
       .eq('reference', reference)
       .eq('type', 'deposit_pending');
 

@@ -193,18 +193,32 @@ router.post('/packs/:packId/pills', async (req, res) => {
  */
 router.get('/stats', async (req, res) => {
   try {
-    const { data: allPills } = await supabase.from('pills').select('*');
-    const { data: allPacks } = await supabase.from('pill_packs').select('*');
-    const { data: allPlays } = await supabase.from('pill_plays').select('won');
+    const [
+      totalPacksRes,
+      activePacksRes,
+      totalPillsRes,
+      availablePillsRes,
+      expiredPillsRes,
+      totalPlaysRes,
+      totalWinsRes,
+    ] = await Promise.all([
+      supabase.from('pill_packs').select('id', { count: 'exact', head: true }),
+      supabase.from('pill_packs').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+      supabase.from('pills').select('id', { count: 'exact', head: true }),
+      supabase.from('pills').select('id', { count: 'exact', head: true }).eq('status', 'available'),
+      supabase.from('pills').select('id', { count: 'exact', head: true }).eq('status', 'expired'),
+      supabase.from('pill_plays').select('id', { count: 'exact', head: true }),
+      supabase.from('pill_plays').select('id', { count: 'exact', head: true }).eq('won', true),
+    ]);
 
     const stats = {
-      totalPacks: allPacks?.length || 0,
-      activePacks: allPacks?.filter((p) => p.status === 'active').length || 0,
-      totalPills: allPills?.length || 0,
-      availablePills: allPills?.filter((p) => p.status === 'available').length || 0,
-      expiredPills: allPills?.filter((p) => p.status === 'expired').length || 0,
-      totalPlays: allPlays?.length || 0,
-      totalWins: allPlays?.filter((p) => p.won).length || 0,
+      totalPacks: totalPacksRes.count || 0,
+      activePacks: activePacksRes.count || 0,
+      totalPills: totalPillsRes.count || 0,
+      availablePills: availablePillsRes.count || 0,
+      expiredPills: expiredPillsRes.count || 0,
+      totalPlays: totalPlaysRes.count || 0,
+      totalWins: totalWinsRes.count || 0,
     };
 
     return res.json({ success: true, data: { stats } });

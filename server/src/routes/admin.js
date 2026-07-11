@@ -60,7 +60,7 @@ router.get('/stats', async (req, res) => {
     const transactions = transactionsRes || [];
 
     const revenueToday = transactions
-      .filter((t) => ['prediction_enter', 'pill_play', 'blitz_entry', 'entry_fee'].includes(t.type))
+      .filter((t) => ['prediction_enter', 'pill_open', 'pill_play', 'blitz_entry', 'entry_fee'].includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const payoutsToday = transactions
@@ -513,7 +513,7 @@ router.get('/analytics/overview', async (req, res) => {
     const transactions = transactionsRes.data || [];
 
     const totalRevenue = transactions
-      .filter((t) => ['prediction_enter', 'pill_play', 'blitz_register', 'entry_fee'].includes(t.type))
+      .filter((t) => ['prediction_enter', 'pill_open', 'pill_play', 'blitz_entry', 'entry_fee'].includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const totalPayouts = transactions
