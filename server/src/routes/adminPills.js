@@ -208,6 +208,74 @@ router.post('/packs/:packId/pills', async (req, res) => {
   }
 });
 
+/**
+ * DELETE /api/admin/pills/packs/:packId
+ * Soft-delete a pack (status → inactive) and expire all its pills.
+ * Blocked if any pills in the pack still have status = 'available'.
+ * Mirrors the frontend safety check server-side — destructive actions must
+ * be validated here regardless of what the client does.
+ */
+router.delete('/packs/:packId', async (req, res) => {
+  try {
+    const { packId } = req.params;
+
+    // Confirm pack exists
+    const { data: pack, error: packErr } = await supabase
+      .from('pill_packs')
+      .select('id, name, status')
+      .eq('id', packId)
+      .single();
+
+    if (packErr || !pack) {
+      return res.status(404).json({ success: false, error: 'Pack not found' });
+    }
+
+    // Safety check: reject if any pills are still available (unplayed)
+    const { count: availableCount, error: countErr } = await supabase
+      .from('pills')
+      .select('id', { count: 'exact', head: true })
+      .eq('pack_id', packId)
+      .eq('status', 'available');
+
+    if (countErr) {
+      return res.status(500).json({ success: false, error: 'Failed to check pill status' });
+    }
+
+    if (availableCount > 0) {
+      return res.status(409).json({
+        success: false,
+        code: 'HAS_UNPLAYED_PILLS',
+        error: `Cannot delete pack — ${availableCount} unplayed pill${availableCount === 1 ? '' : 's'} remaining. Expire or remove them first.`,
+        available_count: availableCount,
+      });
+    }
+
+    // Soft-delete: expire all pills in the pack, then mark pack inactive
+    await supabase
+      .from('pills')
+      .update({ status: 'expired' })
+      .eq('pack_id', packId)
+      .neq('status', 'expired'); // no-op on already-expired pills
+
+    const { error: packUpdateErr } = await supabase
+      .from('pill_packs')
+      .update({ status: 'inactive' })
+      .eq('id', packId);
+
+    if (packUpdateErr) {
+      return res.status(500).json({ success: false, error: 'Failed to delete pack' });
+    }
+
+    return res.json({
+      success: true,
+      data: { message: `Pack "${pack.name}" deleted` },
+    });
+  } catch (err) {
+    console.error('Delete pack error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete pack' });
+  }
+});
+
 // ─── INDIVIDUAL PILL ROUTES ───────────────────────────────────────────────────
 
 /**
