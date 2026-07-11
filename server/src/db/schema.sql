@@ -231,8 +231,14 @@ CREATE TABLE IF NOT EXISTS pill_packs (
   name TEXT NOT NULL,
   category VARCHAR(50),
   status TEXT CHECK (status IN ('active', 'inactive', 'draft')) DEFAULT 'draft',
+  entry_fee DECIMAL(10,2),   -- pack-level fee: all pills in this pack share this price
+  prize DECIMAL(10,2),       -- pack-level prize: all pills in this pack share this reward
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Migration: add entry_fee and prize to existing pill_packs table
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS entry_fee DECIMAL(10,2);
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS prize DECIMAL(10,2);
 
 CREATE INDEX IF NOT EXISTS idx_pill_packs_status ON pill_packs(status);
 

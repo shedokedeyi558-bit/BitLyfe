@@ -89,10 +89,10 @@ router.get('/packs', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
 
-    // Fetch active packs
+    // Fetch active packs including pack-level fee/prize
     const { data: packs, error: packsErr } = await supabase
       .from('pill_packs')
-      .select('id, name, category, status')
+      .select('id, name, category, status, entry_fee, prize')
       .eq('status', 'active')
       .order('created_at', { ascending: false });
 
@@ -131,14 +131,21 @@ router.get('/packs', auth, async (req, res) => {
     }
 
     // Group pills by pack, mark per-player status
+    // Use pack-level entry_fee/prize when set, fall back to per-pill values
+    const packMap = {};
+    for (const pack of packs) packMap[pack.id] = pack;
+
     const pillsByPack = {};
     for (const pill of pills || []) {
       if (!pillsByPack[pill.pack_id]) pillsByPack[pill.pack_id] = [];
+      const pack = packMap[pill.pack_id];
+      const effectiveFee   = pack?.entry_fee !== null && pack?.entry_fee !== undefined ? parseFloat(pack.entry_fee)  : parseFloat(pill.entry_fee);
+      const effectivePrize = pack?.prize     !== null && pack?.prize     !== undefined ? parseFloat(pack.prize)      : parseFloat(pill.prize);
       pillsByPack[pill.pack_id].push({
         id: pill.id,
         color: pill.color || '#00FF66',
-        price: parseFloat(pill.entry_fee),
-        prize: parseFloat(pill.prize),
+        price: effectiveFee,
+        prize: effectivePrize,
         status: playedSet.has(pill.id) ? 'played' : 'available',
       });
     }
@@ -150,6 +157,8 @@ router.get('/packs', auth, async (req, res) => {
         name: pack.name,
         category: pack.category,
         status: pack.status,
+        entry_fee: pack.entry_fee !== null && pack.entry_fee !== undefined ? parseFloat(pack.entry_fee) : null,
+        prize: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
         pills: pillsByPack[pack.id] || [],
       }))
       .filter((pack) => pack.pills.some((pill) => pill.status === 'available'));
@@ -242,7 +251,18 @@ router.post('/open', auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'Pill already played' });
     }
 
-    const entryFee = parseFloat(pill.entry_fee);
+    // Resolve entry_fee: use pack-level if pill belongs to a pack with one set
+    let entryFee = parseFloat(pill.entry_fee);
+    if (pill.pack_id) {
+      const { data: pack } = await supabase
+        .from('pill_packs')
+        .select('entry_fee, prize')
+        .eq('id', pill.pack_id)
+        .single();
+      if (pack?.entry_fee !== null && pack?.entry_fee !== undefined) {
+        entryFee = parseFloat(pack.entry_fee);
+      }
+    }
 
     // Check balance
     if (player.balance < entryFee) {
@@ -276,6 +296,19 @@ router.post('/open', auth, async (req, res) => {
       won: false,
     });
 
+    // Resolve prize for response (same pack-level logic)
+    let responsePrize = parseFloat(pill.prize);
+    if (pill.pack_id) {
+      const { data: pack } = await supabase
+        .from('pill_packs')
+        .select('prize')
+        .eq('id', pill.pack_id)
+        .single();
+      if (pack?.prize !== null && pack?.prize !== undefined) {
+        responsePrize = parseFloat(pack.prize);
+      }
+    }
+
     return res.json({
       success: true,
       data: {
@@ -284,7 +317,7 @@ router.post('/open', auth, async (req, res) => {
         format: pill.format,
         options: pill.options,
         timer: pill.timer_seconds,
-        prize: parseFloat(pill.prize),
+        prize: responsePrize,
         entryFee: entryFee,
         newBalance: player.balance - entryFee,
       },
@@ -334,7 +367,19 @@ router.post('/submit', auth, async (req, res) => {
 
     // Check answer
     const correct = checkAnswer(pill, String(answer));
-    const prize = parseFloat(pill.prize);
+
+    // Resolve prize: use pack-level if pill belongs to a pack with one set
+    let prize = parseFloat(pill.prize);
+    if (pill.pack_id) {
+      const { data: pack } = await supabase
+        .from('pill_packs')
+        .select('prize')
+        .eq('id', pill.pack_id)
+        .single();
+      if (pack?.prize !== null && pack?.prize !== undefined) {
+        prize = parseFloat(pack.prize);
+      }
+    }
 
     // Mark pill as played in the pills table immediately
     await supabase

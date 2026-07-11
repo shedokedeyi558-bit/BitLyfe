@@ -68,3 +68,11 @@ CREATE INDEX IF NOT EXISTS idx_player_limits_player_id ON player_limits(player_i
 CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_reference_unique
   ON transactions (reference)
   WHERE reference IS NOT NULL AND type = 'deposit';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- MIGRATION: Add pack-level entry_fee and prize to pill_packs
+-- Run in Supabase SQL editor.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS entry_fee DECIMAL(10,2);
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS prize DECIMAL(10,2);

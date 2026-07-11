@@ -62,11 +62,12 @@ router.get('/packs', async (req, res) => {
 /**
  * POST /api/admin/pills/packs
  * Create a new pill pack
- * Body: { name, category, status? }
+ * Body: { name, category, status?, entry_fee?, prize? }
+ * entry_fee and prize are pack-level — all pills in this pack share these values.
  */
 router.post('/packs', async (req, res) => {
   try {
-    const { name, category, status } = req.body;
+    const { name, category, status, entry_fee, prize } = req.body;
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'name is required' });
@@ -78,6 +79,8 @@ router.post('/packs', async (req, res) => {
         name,
         category: category || 'General',
         status: status || 'draft',
+        entry_fee: entry_fee !== undefined ? Number(entry_fee) : null,
+        prize: prize !== undefined ? Number(prize) : null,
       })
       .select()
       .single();
@@ -93,17 +96,19 @@ router.post('/packs', async (req, res) => {
 
 /**
  * PUT /api/admin/pills/packs/:packId
- * Update a pack's name, category, or status
- * Body: { name?, category?, status? }
+ * Update a pack's name, category, status, entry_fee, or prize
+ * Body: { name?, category?, status?, entry_fee?, prize? }
  */
 router.put('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
-    const { name, category, status } = req.body;
+    const { name, category, status, entry_fee, prize } = req.body;
 
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (category !== undefined) updates.category = category;
+    if (entry_fee !== undefined) updates.entry_fee = entry_fee === null ? null : Number(entry_fee);
+    if (prize !== undefined) updates.prize = prize === null ? null : Number(prize);
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });
@@ -133,18 +138,20 @@ router.put('/packs/:packId', async (req, res) => {
 
 /**
  * POST /api/admin/pills/packs/:packId/pills
- * Add a pill to a pack
- * Body: { question, format, options?, correct_answer, timer?, entry_fee, prize, color? }
+ * Add a pill to a pack.
+ * entry_fee and prize are optional if the pack has pack-level values set —
+ * the pill will inherit from the pack. Explicit pill-level values override.
+ * Body: { question, format, options?, correct_answer, timer?, entry_fee?, prize?, color? }
  */
 router.post('/packs/:packId/pills', async (req, res) => {
   try {
     const { packId } = req.params;
     const { question, format, options, correct_answer, timer, entry_fee, prize, color, case_sensitive } = req.body;
 
-    if (!question || !format || !correct_answer || entry_fee === undefined || prize === undefined) {
+    if (!question || !format || !correct_answer) {
       return res.status(400).json({
         success: false,
-        error: 'question, format, correct_answer, entry_fee, and prize are required',
+        error: 'question, format, and correct_answer are required',
       });
     }
 
@@ -152,9 +159,25 @@ router.post('/packs/:packId/pills', async (req, res) => {
       return res.status(400).json({ success: false, error: 'format must be multiple_choice or type_answer' });
     }
 
-    // Verify pack exists
-    const { data: pack } = await supabase.from('pill_packs').select('id').eq('id', packId).single();
+    // Fetch pack to get pack-level fee/prize as fallback
+    const { data: pack } = await supabase
+      .from('pill_packs')
+      .select('id, entry_fee, prize')
+      .eq('id', packId)
+      .single();
+
     if (!pack) return res.status(404).json({ success: false, error: 'Pack not found' });
+
+    // Resolve entry_fee and prize: explicit pill value takes priority, then pack-level
+    const resolvedFee = entry_fee !== undefined ? Number(entry_fee) : (pack.entry_fee !== null ? Number(pack.entry_fee) : null);
+    const resolvedPrize = prize !== undefined ? Number(prize) : (pack.prize !== null ? Number(pack.prize) : null);
+
+    if (resolvedFee === null || resolvedPrize === null) {
+      return res.status(400).json({
+        success: false,
+        error: 'entry_fee and prize are required — set them on the pill or on the pack',
+      });
+    }
 
     const { data, error } = await supabase
       .from('pills')
@@ -163,8 +186,8 @@ router.post('/packs/:packId/pills', async (req, res) => {
         pack_id: packId,
         question,
         category: null,
-        entry_fee: Number(entry_fee),
-        prize: Number(prize),
+        entry_fee: resolvedFee,
+        prize: resolvedPrize,
         format,
         options: options || null,
         correct_answer,
