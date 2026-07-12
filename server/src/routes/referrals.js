@@ -211,9 +211,9 @@ router.get('/stats', auth, async (req, res) => {
       data: {
         referral_code: referralCode,
         referral_link: referralLink,
-        pending,
-        completed,
-        total: pending + completed,
+        referred_count: pending + completed,
+        pending_count: pending,
+        completed_count: completed,
         total_earned: totalEarned,
       },
     });
@@ -225,54 +225,92 @@ router.get('/stats', auth, async (req, res) => {
 
 /**
  * GET /api/player/referrals/tickets
- * Returns active (unused, non-expired) pill tickets earned from referrals.
- * Also lazy-expires stale tickets on read.
+ * Returns all active tickets for the player — both pill tickets (referral-sourced)
+ * and Blitz near-miss tickets — merged into a unified shape.
+ * status: "unused" in DB → "active" in response
+ * code: normalised field name (from ticket_code / ticket_code)
+ * type: "pill" | "blitz"
  */
 router.get('/tickets', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
     const now = new Date().toISOString();
 
-    // Lazy-expire any tickets past their expiry date still marked unused
-    const { data: expiredStale } = await supabase
+    // ── Lazy-expire stale pill_tickets ───────────────────────────────────────
+    const { data: stalePill } = await supabase
       .from('pill_tickets')
       .select('id')
       .eq('player_id', playerId)
       .eq('status', 'unused')
       .lte('expires_at', now);
 
-    if (expiredStale && expiredStale.length > 0) {
+    if (stalePill && stalePill.length > 0) {
       await supabase
         .from('pill_tickets')
         .update({ status: 'expired' })
-        .in('id', expiredStale.map(t => t.id));
+        .in('id', stalePill.map(t => t.id));
     }
 
-    // Fetch active tickets
-    const { data: tickets } = await supabase
+    // ── Lazy-expire stale blitz_tickets ──────────────────────────────────────
+    const { data: staleBlitz } = await supabase
+      .from('blitz_tickets')
+      .select('id')
+      .eq('player_id', playerId)
+      .eq('status', 'unused')
+      .lte('expires_at', now);
+
+    if (staleBlitz && staleBlitz.length > 0) {
+      await supabase
+        .from('blitz_tickets')
+        .update({ status: 'expired' })
+        .in('id', staleBlitz.map(t => t.id));
+    }
+
+    // ── Fetch active pill tickets ─────────────────────────────────────────────
+    const { data: pillTickets } = await supabase
       .from('pill_tickets')
-      .select('id, ticket_code, source, awarded_at, expires_at, status')
+      .select('id, ticket_code, expires_at, status')
       .eq('player_id', playerId)
       .eq('status', 'unused')
       .gt('expires_at', now)
       .order('expires_at', { ascending: true });
 
+    // ── Fetch active blitz tickets ────────────────────────────────────────────
+    const { data: blitzTickets } = await supabase
+      .from('blitz_tickets')
+      .select('id, ticket_code, expires_at, status')
+      .eq('player_id', playerId)
+      .eq('status', 'unused')
+      .gt('expires_at', now)
+      .order('expires_at', { ascending: true });
+
+    // ── Merge and normalise ───────────────────────────────────────────────────
+    const tickets = [
+      ...(pillTickets || []).map(t => ({
+        id: t.id,
+        code: t.ticket_code,
+        type: 'pill',
+        expires_at: t.expires_at,
+        status: 'active',          // unused → active in response
+      })),
+      ...(blitzTickets || []).map(t => ({
+        id: t.id,
+        code: t.ticket_code,
+        type: 'blitz',
+        expires_at: t.expires_at,
+        status: 'active',
+      })),
+    ].sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+
     return res.json({
       success: true,
       data: {
-        tickets: (tickets || []).map(t => ({
-          id: t.id,
-          ticket_code: t.ticket_code,
-          source: t.source,
-          awarded_at: t.awarded_at,
-          expires_at: t.expires_at,
-          status: t.status,
-        })),
-        count: (tickets || []).length,
+        tickets,
+        count: tickets.length,
       },
     });
   } catch (err) {
-    console.error('Get pill tickets error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to fetch pill tickets' });
+    console.error('Get tickets error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch tickets' });
   }
 });
