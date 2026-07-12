@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const paystack = require('../services/paystack');
+const { checkReferralCompletion } = require('./referrals');
 
 const router = express.Router();
 
@@ -322,6 +323,9 @@ router.get('/verify', auth, async (req, res) => {
       .delete()
       .eq('reference', reference)
       .eq('type', 'deposit_pending');
+
+    // Trigger referral first-deposit check (fire-and-forget)
+    checkReferralCompletion(player.id, 'deposit', amountNaira).catch(() => {});
 
     return res.json({
       success: true,

@@ -1,4 +1,5 @@
 const { createNotification } = require('./notifications');
+const { checkReferralCompletion } = require('./referrals');
 const express = require('express');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
@@ -296,6 +297,9 @@ router.post('/open', auth, async (req, res) => {
       won: false,
     });
 
+    // Trigger referral first-game check (fire-and-forget — never blocks the response)
+    checkReferralCompletion(player.id, 'game').catch(() => {});
+
     // Resolve prize for response (same pack-level logic)
     let responsePrize = parseFloat(pill.prize);
     if (pill.pack_id) {
@@ -478,6 +482,146 @@ router.post('/submit', auth, async (req, res) => {
   } catch (err) {
     console.error('Submit pill error:', err);
     return res.status(500).json({ success: false, error: 'Failed to submit pill answer' });
+  }
+});
+
+/**
+ * POST /api/pills/redeem-ticket
+ * Validate and redeem a pill_tickets code — waives entry fee for one pill open.
+ * Blocked on VIP packs (is_vip = true). Ticket must be unused and not expired.
+ * Body: { ticket_code, pillId }
+ */
+router.post('/redeem-ticket', auth, async (req, res) => {
+  try {
+    const { ticket_code, pillId } = req.body;
+    const player = req.player;
+
+    if (!ticket_code || !pillId) {
+      return res.status(400).json({ success: false, error: 'ticket_code and pillId are required' });
+    }
+
+    // Fetch and validate ticket
+    const { data: ticket } = await supabase
+      .from('pill_tickets')
+      .select('id, player_id, expires_at, status')
+      .eq('ticket_code', ticket_code.trim().toUpperCase())
+      .maybeSingle();
+
+    if (!ticket) {
+      return res.status(404).json({ success: false, code: 'TICKET_NOT_FOUND', error: 'Ticket not found' });
+    }
+
+    if (ticket.player_id !== player.id) {
+      return res.status(403).json({ success: false, code: 'TICKET_NOT_OWNER', error: 'This ticket does not belong to you' });
+    }
+
+    const now = new Date();
+
+    // Lazy-expire check
+    if (new Date(ticket.expires_at) < now && ticket.status === 'unused') {
+      await supabase.from('pill_tickets').update({ status: 'expired' }).eq('id', ticket.id);
+      return res.status(410).json({ success: false, code: 'TICKET_EXPIRED', error: 'Ticket has expired' });
+    }
+
+    if (ticket.status === 'used') {
+      return res.status(409).json({ success: false, code: 'TICKET_ALREADY_USED', error: 'Ticket has already been used' });
+    }
+
+    if (ticket.status === 'expired') {
+      return res.status(410).json({ success: false, code: 'TICKET_EXPIRED', error: 'Ticket has expired' });
+    }
+
+    // Fetch pill
+    const { data: pill, error: pillErr } = await supabase
+      .from('pills')
+      .select('*')
+      .eq('id', pillId)
+      .single();
+
+    if (pillErr || !pill) {
+      return res.status(404).json({ success: false, error: 'Pill not found' });
+    }
+
+    if (pill.status === 'expired') {
+      return res.status(409).json({ success: false, error: 'Pill has expired' });
+    }
+
+    // Block VIP packs — pill tickets are only valid on standard packs
+    if (pill.pack_id) {
+      const { data: pack } = await supabase
+        .from('pill_packs')
+        .select('is_vip')
+        .eq('id', pill.pack_id)
+        .single();
+      if (pack?.is_vip) {
+        return res.status(403).json({
+          success: false,
+          code: 'VIP_PACK_NOT_ALLOWED',
+          error: 'Pill tickets cannot be used on VIP packs',
+        });
+      }
+    }
+
+    // Check if this player already played this pill
+    const { data: existingPlay } = await supabase
+      .from('pill_plays')
+      .select('id')
+      .eq('pill_id', pillId)
+      .eq('player_id', player.id)
+      .maybeSingle();
+
+    if (existingPlay) {
+      return res.status(409).json({ success: false, error: 'Pill already played' });
+    }
+
+    // Resolve prize (pack-level or pill-level)
+    let responsePrize = parseFloat(pill.prize);
+    if (pill.pack_id) {
+      const { data: pack } = await supabase.from('pill_packs').select('prize').eq('id', pill.pack_id).single();
+      if (pack?.prize != null) responsePrize = parseFloat(pack.prize);
+    }
+
+    // Mark ticket as used
+    await supabase
+      .from('pill_tickets')
+      .update({ status: 'used', used_on_pack_id: pill.pack_id || null })
+      .eq('id', ticket.id);
+
+    // Create pill_play record (entry fee waived — no balance deduction)
+    await supabase.from('pill_plays').insert({
+      pill_id: pillId,
+      player_id: player.id,
+      won: false,
+    });
+
+    // Record zero-cost transaction for audit trail
+    await supabase.from('transactions').insert({
+      player_id: player.id,
+      type: 'pill_ticket_redeem',
+      amount: 0,
+      description: `Pill opened with ticket ${ticket_code} (entry fee waived)`,
+    });
+
+    // Trigger referral first-game check
+    checkReferralCompletion(player.id, 'game').catch(() => {});
+
+    return res.json({
+      success: true,
+      data: {
+        question: pill.question,
+        category: pill.category,
+        format: pill.format,
+        options: pill.options,
+        timer: pill.timer_seconds,
+        prize: responsePrize,
+        entryFee: 0,
+        ticketUsed: ticket_code,
+        newBalance: player.balance, // unchanged — ticket waived the fee
+      },
+    });
+  } catch (err) {
+    console.error('Redeem pill ticket error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to redeem ticket' });
   }
 });
 

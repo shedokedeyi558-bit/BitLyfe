@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
+const { checkReferralCompletion } = require('./referrals');
 
 const router = express.Router();
 
@@ -225,6 +226,9 @@ router.post('/enter', auth, async (req, res) => {
       amount: -entryFee,
       description: `Entered prediction: ${prediction.question.substring(0, 50)}...`,
     });
+
+    // Trigger referral first-game check (fire-and-forget)
+    checkReferralCompletion(player.id, 'game').catch(() => {});
 
     return res.json({
       success: true,

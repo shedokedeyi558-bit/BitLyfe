@@ -19,6 +19,7 @@ const adminPredictionsRoutes = require('./routes/adminPredictions');
 const notificationsRoutes = require('./routes/notifications');
 const blitzRoutes = require('./routes/blitz');
 const adminBlitzRoutes = require('./routes/adminBlitz');
+const { router: referralsRouter } = require('./routes/referrals');
 const supabase = require('./db/supabase');
 
 const app = express();
@@ -151,6 +152,7 @@ app.use('/api/admin/challenges', challengeRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/challenges', challengeRoutes);
+app.use('/api/player/referrals', referralsRouter);
 
 // ─── Paystack Webhook ─────────────────────────────────────────────────────────
 
