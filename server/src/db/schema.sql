@@ -17,9 +17,13 @@ CREATE TABLE IF NOT EXISTS players (
   total_won INT DEFAULT 0,
   is_admin BOOLEAN DEFAULT false,
   status TEXT DEFAULT 'active',
+  referral_code TEXT UNIQUE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add referral_code to existing players table
+ALTER TABLE players ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
 
 -- Questions table
 CREATE TABLE IF NOT EXISTS questions (
@@ -457,3 +461,54 @@ CREATE TABLE IF NOT EXISTS prediction_participations (
 CREATE INDEX IF NOT EXISTS idx_prediction_participations_prediction_id ON prediction_participations(prediction_id);
 CREATE INDEX IF NOT EXISTS idx_prediction_participations_player_id ON prediction_participations(player_id);
 CREATE INDEX IF NOT EXISTS idx_prediction_participations_is_correct ON prediction_participations(is_correct);
+
+-- ─── REFERRALS TABLE ──────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS referrals (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  referrer_id UUID REFERENCES players(id) ON DELETE CASCADE NOT NULL,
+  referee_id UUID REFERENCES players(id) ON DELETE CASCADE NOT NULL,
+  status TEXT CHECK (status IN ('pending', 'completed')) DEFAULT 'pending',
+  first_deposit_done BOOLEAN DEFAULT false,
+  first_game_done BOOLEAN DEFAULT false,
+  first_deposit_amount INTEGER DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  completed_at TIMESTAMP WITH TIME ZONE,
+  UNIQUE(referee_id)  -- one referral row per referee
+);
+
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON referrals(referrer_id);
+CREATE INDEX IF NOT EXISTS idx_referrals_referee_id ON referrals(referee_id);
+CREATE INDEX IF NOT EXISTS idx_referrals_status ON referrals(status);
+
+-- ─── PILL TICKETS TABLE ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pill_tickets (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE NOT NULL,
+  source TEXT NOT NULL DEFAULT 'referral',   -- 'referral' for now, extensible later
+  ticket_code TEXT UNIQUE NOT NULL,
+  awarded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  status TEXT CHECK (status IN ('unused', 'used', 'expired')) DEFAULT 'unused',
+  used_on_pack_id UUID REFERENCES pill_packs(id) ON DELETE SET NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pill_tickets_player_id ON pill_tickets(player_id);
+CREATE INDEX IF NOT EXISTS idx_pill_tickets_ticket_code ON pill_tickets(ticket_code);
+CREATE INDEX IF NOT EXISTS idx_pill_tickets_status ON pill_tickets(status);
+CREATE INDEX IF NOT EXISTS idx_pill_tickets_expires_at ON pill_tickets(expires_at);
+
+-- ─── REFERRAL MILESTONES TABLE ────────────────────────────────────────────────
+-- Tracks which one-time milestones each player has already received
+
+CREATE TABLE IF NOT EXISTS referral_milestones (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE NOT NULL,
+  milestone INTEGER NOT NULL,   -- 5, 15, etc.
+  credited_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(player_id, milestone)
+);
+
+CREATE INDEX IF NOT EXISTS idx_referral_milestones_player_id ON referral_milestones(player_id);
