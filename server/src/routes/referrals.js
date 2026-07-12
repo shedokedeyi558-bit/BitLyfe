@@ -169,10 +169,10 @@ module.exports = { router, checkReferralCompletion };
 // ─── PLAYER ENDPOINTS ─────────────────────────────────────────────────────────
 
 /**
- * GET /api/player/referrals
- * Returns the player's referral code, link, stats, earnings, and active pill tickets.
+ * GET /api/player/referrals/stats
+ * Returns referral code, link, referral counts, and total earnings.
  */
-router.get('/', auth, async (req, res) => {
+router.get('/stats', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
 
@@ -206,18 +206,34 @@ router.get('/', auth, async (req, res) => {
 
     const totalEarned = (earningsTxns || []).reduce((sum, t) => sum + (t.amount || 0), 0);
 
-    // Active (unused, non-expired) pill tickets from referrals
-    const now = new Date().toISOString();
-    const { data: tickets } = await supabase
-      .from('pill_tickets')
-      .select('id, ticket_code, awarded_at, expires_at, status')
-      .eq('player_id', playerId)
-      .eq('source', 'referral')
-      .eq('status', 'unused')
-      .gt('expires_at', now)
-      .order('expires_at', { ascending: true });
+    return res.json({
+      success: true,
+      data: {
+        referral_code: referralCode,
+        referral_link: referralLink,
+        pending,
+        completed,
+        total: pending + completed,
+        total_earned: totalEarned,
+      },
+    });
+  } catch (err) {
+    console.error('Get referral stats error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch referral stats' });
+  }
+});
 
-    // Lazy-expire tickets that are past expiry but still marked unused
+/**
+ * GET /api/player/referrals/tickets
+ * Returns active (unused, non-expired) pill tickets earned from referrals.
+ * Also lazy-expires stale tickets on read.
+ */
+router.get('/tickets', auth, async (req, res) => {
+  try {
+    const playerId = req.player.id;
+    const now = new Date().toISOString();
+
+    // Lazy-expire any tickets past their expiry date still marked unused
     const { data: expiredStale } = await supabase
       .from('pill_tickets')
       .select('id')
@@ -232,28 +248,31 @@ router.get('/', auth, async (req, res) => {
         .in('id', expiredStale.map(t => t.id));
     }
 
+    // Fetch active tickets
+    const { data: tickets } = await supabase
+      .from('pill_tickets')
+      .select('id, ticket_code, source, awarded_at, expires_at, status')
+      .eq('player_id', playerId)
+      .eq('status', 'unused')
+      .gt('expires_at', now)
+      .order('expires_at', { ascending: true });
+
     return res.json({
       success: true,
       data: {
-        referral_code: referralCode,
-        referral_link: referralLink,
-        referrals: {
-          pending,
-          completed,
-          total: pending + completed,
-        },
-        total_earned: totalEarned,
-        active_pill_tickets: (tickets || []).map(t => ({
+        tickets: (tickets || []).map(t => ({
           id: t.id,
           ticket_code: t.ticket_code,
+          source: t.source,
           awarded_at: t.awarded_at,
           expires_at: t.expires_at,
           status: t.status,
         })),
+        count: (tickets || []).length,
       },
     });
   } catch (err) {
-    console.error('Get referrals error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to fetch referral data' });
+    console.error('Get pill tickets error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch pill tickets' });
   }
 });
