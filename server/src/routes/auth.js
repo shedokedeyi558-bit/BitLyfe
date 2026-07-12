@@ -10,6 +10,29 @@ const router = express.Router();
 const otpStore = new Map();
 
 /**
+ * Generate a unique 6-char alphanumeric referral code
+ * Retries up to 5 times on collision (astronomically unlikely)
+ */
+async function generateReferralCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I,O,0,1 to avoid confusion
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    // Check uniqueness
+    const { data } = await supabase
+      .from('players')
+      .select('id')
+      .eq('referral_code', code)
+      .maybeSingle();
+    if (!data) return code; // no collision
+  }
+  // Fallback: use part of a UUID (guaranteed unique enough)
+  return uuidv4().replace(/-/g, '').substring(0, 8).toUpperCase();
+}
+
+/**
  * Email validation helper
  */
 function isValidEmail(email) {
@@ -54,10 +77,12 @@ function generateToken(player) {
 /**
  * POST /api/auth/signup
  * Register a new player with email and password
+ * Optional query param: ?ref=CODE (referral code of the referring player)
  */
 router.post('/signup', async (req, res) => {
   try {
     const { email, password, phone, name } = req.body;
+    const refCode = req.query.ref || req.body.ref || null;
 
     // Validate required fields
     if (!email || !password || !phone) {
@@ -67,51 +92,55 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // Validate email format
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, error: 'Invalid email format' });
     }
 
-    // Validate password length
     if (password.length < 6) {
       return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
 
-    // Validate phone
     if (!validatePhone(phone)) {
       return res.status(400).json({ success: false, error: 'Invalid phone number format' });
     }
 
-    // Normalize inputs
     const normalizedEmail = email.trim().toLowerCase();
     const normalizedPhone = normalizePhone(phone);
 
-    // Check if email already exists
     const { data: existingEmail } = await supabase
       .from('players')
       .select('id')
       .eq('email', normalizedEmail)
-      .single();
+      .maybeSingle();
 
     if (existingEmail) {
       return res.status(400).json({ success: false, error: 'Email already exists' });
     }
 
-    // Check if phone already exists
     const { data: existingPhone } = await supabase
       .from('players')
       .select('id')
       .eq('phone', normalizedPhone)
-      .single();
+      .maybeSingle();
 
     if (existingPhone) {
       return res.status(400).json({ success: false, error: 'Phone number already registered' });
     }
 
-    // Hash password
+    // Resolve referrer if ref code provided
+    let referrerId = null;
+    if (refCode) {
+      const { data: referrer } = await supabase
+        .from('players')
+        .select('id')
+        .eq('referral_code', refCode.trim().toUpperCase())
+        .maybeSingle();
+      if (referrer) referrerId = referrer.id;
+      // Invalid codes are silently ignored — don't block signup
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Fetch bonus from app_settings
     const { data: settings } = await supabase
       .from('app_settings')
       .select('new_user_bonus')
@@ -120,7 +149,9 @@ router.post('/signup', async (req, res) => {
 
     const newUserBonus = settings?.new_user_bonus ?? 0;
 
-    // Create new player
+    // Generate unique referral code for this new player
+    const newReferralCode = await generateReferralCode();
+
     const { data: player, error: insertErr } = await supabase
       .from('players')
       .insert({
@@ -130,8 +161,9 @@ router.post('/signup', async (req, res) => {
         name: name || null,
         balance: newUserBonus,
         is_admin: false,
+        referral_code: newReferralCode,
       })
-      .select('id, email, phone, name, balance, is_admin')
+      .select('id, email, phone, name, balance, is_admin, referral_code')
       .single();
 
     if (insertErr) {
@@ -139,7 +171,7 @@ router.post('/signup', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to create account' });
     }
 
-    // Credit bonus if applicable
+    // Credit welcome bonus if applicable
     if (newUserBonus > 0) {
       await supabase.from('transactions').insert({
         player_id: player.id,
@@ -149,7 +181,18 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // Generate token
+    // Create referral row if a valid referrer was found
+    if (referrerId) {
+      await supabase.from('referrals').insert({
+        referrer_id: referrerId,
+        referee_id: player.id,
+        status: 'pending',
+        first_deposit_done: false,
+        first_game_done: false,
+        first_deposit_amount: 0,
+      });
+    }
+
     const token = generateToken(player);
 
     return res.status(201).json({
@@ -163,6 +206,7 @@ router.post('/signup', async (req, res) => {
           name: player.name,
           balance: player.balance,
           is_admin: player.is_admin,
+          referral_code: player.referral_code,
         },
       },
     });
@@ -244,43 +288,46 @@ router.post('/signin', async (req, res) => {
 router.post('/register', async (req, res) => {
   try {
     const { phone, name } = req.body;
+    const refCode = req.query.ref || req.body.ref || null;
 
     if (!phone) {
       return res.status(400).json({ success: false, error: 'Phone number is required' });
     }
 
-    // Normalize phone using shared helper
     const normalizedPhone = normalizePhone(phone);
 
-    // Check if player already exists
     const { data: existing } = await supabase
       .from('players')
       .select('id, phone, status')
       .eq('phone', normalizedPhone)
-      .single();
+      .maybeSingle();
 
     if (existing && existing.status === 'banned') {
       return res.status(403).json({ success: false, error: 'This account has been banned' });
     }
 
-    // Send OTP regardless of whether player is new or existing
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     otpStore.set(normalizedPhone, { otp, expires: Date.now() + 5 * 60 * 1000 });
-
     console.log(`[OTP] ${normalizedPhone} → ${otp}`);
 
     if (existing) {
       return res.json({
         success: true,
-        data: {
-          message: 'Welcome back! OTP sent to your phone.',
-          isExisting: true,
-          phone: normalizedPhone,
-        },
+        data: { message: 'Welcome back! OTP sent to your phone.', isExisting: true, phone: normalizedPhone },
       });
     }
 
-    // Create new player (phone-based, no email/password)
+    // Resolve referrer
+    let referrerId = null;
+    if (refCode) {
+      const { data: referrer } = await supabase
+        .from('players')
+        .select('id')
+        .eq('referral_code', refCode.trim().toUpperCase())
+        .maybeSingle();
+      if (referrer) referrerId = referrer.id;
+    }
+
     const { data: settings } = await supabase
       .from('app_settings')
       .select('new_user_bonus')
@@ -288,6 +335,7 @@ router.post('/register', async (req, res) => {
       .single();
 
     const newUserBonus = settings?.new_user_bonus ?? 0;
+    const newReferralCode = await generateReferralCode();
 
     const { data: player, error } = await supabase
       .from('players')
@@ -296,6 +344,7 @@ router.post('/register', async (req, res) => {
         name: name || null,
         balance: newUserBonus,
         is_admin: false,
+        referral_code: newReferralCode,
       })
       .select()
       .single();
@@ -313,13 +362,21 @@ router.post('/register', async (req, res) => {
       });
     }
 
+    // Create referral row if a valid referrer was found
+    if (referrerId) {
+      await supabase.from('referrals').insert({
+        referrer_id: referrerId,
+        referee_id: player.id,
+        status: 'pending',
+        first_deposit_done: false,
+        first_game_done: false,
+        first_deposit_amount: 0,
+      });
+    }
+
     return res.status(201).json({
       success: true,
-      data: {
-        message: 'Account created! OTP sent to your phone.',
-        isExisting: false,
-        phone: normalizedPhone,
-      },
+      data: { message: 'Account created! OTP sent to your phone.', isExisting: false, phone: normalizedPhone },
     });
   } catch (err) {
     console.error('Register error:', err);
