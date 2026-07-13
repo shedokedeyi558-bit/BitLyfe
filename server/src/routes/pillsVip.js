@@ -4,6 +4,7 @@ const auth = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { checkAnswer } = require('../services/gameLogic');
 const { createNotification } = require('./notifications');
+const { deductEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
@@ -133,24 +134,21 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       });
     }
 
-    // Check balance
-    if (entryFee > 0 && player.balance < entryFee) {
+    // Check balance (bonus + real combined)
+    if ((player.balance || 0) + (player.bonus_balance || 0) < entryFee) {
       return res.status(402).json({ success: false, error: 'Insufficient balance' });
     }
 
-    // Charge entry fee
-    if (entryFee > 0) {
-      await supabase
-        .from('players')
-        .update({ balance: player.balance - entryFee })
-        .eq('id', player.id);
-
-      await supabase.from('transactions').insert({
-        player_id: player.id,
+    // Charge entry fee — bonus first, real balance for remainder. Transaction recorded inside.
+    let billing;
+    try {
+      billing = await deductEntryFee(player.id, entryFee, {
         type: 'pill_open',
-        amount: -entryFee,
         description: `VIP pack entry: ${pack.name}`,
       });
+    } catch (billingErr) {
+      if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
+      throw billingErr;
     }
 
     // Create attempt
@@ -166,9 +164,12 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       .single();
 
     if (attemptErr) {
-      // Refund if insert failed
-      if (entryFee > 0) {
-        await supabase.from('players').update({ balance: player.balance }).eq('id', player.id);
+      // Refund if insert failed — restore both deducted amounts
+      if (entryFee > 0 && billing) {
+        await supabase.from('players').update({
+          balance: player.balance,
+          bonus_balance: player.bonus_balance || 0,
+        }).eq('id', player.id);
       }
       return res.status(500).json({ success: false, error: 'Failed to start VIP attempt' });
     }
@@ -179,7 +180,9 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       session_id: attempt.id,
       question: sanitizePill(pills[0], 0, pills.length),
       questions_remaining: pills.length,
-      newBalance: entryFee > 0 ? player.balance - entryFee : player.balance,
+      newBalance: billing ? billing.newBalance : player.balance,
+      newBonusBalance: billing ? billing.newBonusBalance : (player.bonus_balance || 0),
+      bonusUsed: billing ? billing.bonusUsed : 0,
     });
   } catch (err) {
     console.error('VIP start error:', err);

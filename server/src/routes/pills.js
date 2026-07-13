@@ -5,6 +5,7 @@ const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { checkAnswer } = require('../services/gameLogic');
+const { deductEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
@@ -266,8 +267,8 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       }
     }
 
-    // Check balance
-    if (player.balance < entryFee) {
+    // Check balance (bonus + real combined)
+    if ((player.balance || 0) + (player.bonus_balance || 0) < entryFee) {
       return res.status(402).json({ success: false, error: 'Insufficient balance' });
     }
 
@@ -277,19 +278,17 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
     }
 
-    // Deduct entry fee
-    await supabase
-      .from('players')
-      .update({ balance: player.balance - entryFee })
-      .eq('id', player.id);
-
-    // Record transaction
-    await supabase.from('transactions').insert({
-      player_id: player.id,
-      type: 'pill_open',
-      amount: -entryFee,
-      description: `Opened pill: ${pill.question.substring(0, 50)}`,
-    });
+    // Deduct entry fee — bonus first, real balance for remainder. Transaction recorded inside.
+    let billing;
+    try {
+      billing = await deductEntryFee(player.id, entryFee, {
+        type: 'pill_open',
+        description: `Opened pill: ${pill.question.substring(0, 50)}`,
+      });
+    } catch (billingErr) {
+      if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
+      throw billingErr;
+    }
 
     // Create pill_play record (marks this player as having opened this pill)
     await supabase.from('pill_plays').insert({
@@ -324,7 +323,9 @@ router.post('/open', idempotency(), auth, async (req, res) => {
         timer: pill.timer_seconds,
         prize: responsePrize,
         entryFee: entryFee,
-        newBalance: player.balance - entryFee,
+        newBalance: billing.newBalance,
+        newBonusBalance: billing.newBonusBalance,
+        bonusUsed: billing.bonusUsed,
       },
     });
   } catch (err) {

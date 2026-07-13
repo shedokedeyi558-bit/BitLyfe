@@ -22,7 +22,7 @@ const auth = async (req, res, next) => {
     // Fetch player from DB to ensure they're still active
     const { data: player, error } = await supabase
       .from('players')
-      .select('id, phone, name, balance, status')
+      .select('id, phone, name, balance, bonus_balance, status')
       .eq('id', decoded.playerId)
       .single();
 

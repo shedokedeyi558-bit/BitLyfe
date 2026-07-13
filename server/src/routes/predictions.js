@@ -5,6 +5,7 @@ const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const idempotency = require('../middleware/idempotency');
 const { checkReferralCompletion } = require('./referrals');
+const { deductEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
@@ -163,8 +164,8 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
 
     const entryFee = parseFloat(prediction.entry_fee);
 
-    // Check balance
-    if (player.balance < entryFee) {
+    // Check balance (bonus + real combined)
+    if ((player.balance || 0) + (player.bonus_balance || 0) < entryFee) {
       return res.status(402).json({ success: false, error: 'Insufficient balance' });
     }
 
@@ -172,6 +173,18 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
     const limitCheck = await checkSpendLimit(player.id, entryFee);
     if (!limitCheck.allowed) {
       return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
+    }
+
+    // Deduct entry fee — bonus first, real balance for remainder. Transaction recorded inside.
+    let billing;
+    try {
+      billing = await deductEntryFee(player.id, entryFee, {
+        type: 'prediction_enter',
+        description: `Entered prediction: ${prediction.question.substring(0, 50)}...`,
+      });
+    } catch (billingErr) {
+      if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
+      throw billingErr;
     }
 
     // Check if already participated — idempotency: return existing state, never double-charge
@@ -206,10 +219,6 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
       });
     }
 
-    // Deduct entry fee
-    const newBalance = player.balance - entryFee;
-    await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
-
     // Create participation record (answer is null until /submit is called)
     await supabase.from('prediction_participations').insert({
       prediction_id: predictionId,
@@ -234,14 +243,6 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
       })
       .eq('id', predictionId);
 
-    // Record transaction
-    await supabase.from('transactions').insert({
-      player_id: player.id,
-      type: 'prediction_enter',
-      amount: -entryFee,
-      description: `Entered prediction: ${prediction.question.substring(0, 50)}...`,
-    });
-
     // Trigger referral first-game check (fire-and-forget)
     checkReferralCompletion(player.id, 'game').catch(() => {});
 
@@ -259,7 +260,9 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
           countdown_end: prediction.countdown_end_time,
           status: newStatus,
         },
-        newBalance: newBalance,
+        newBalance: billing.newBalance,
+        newBonusBalance: billing.newBonusBalance,
+        bonusUsed: billing.bonusUsed,
       },
     });
   } catch (err) {

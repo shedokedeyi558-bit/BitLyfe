@@ -15,7 +15,7 @@ router.get('/balance', auth, async (req, res) => {
   try {
     const { data: player, error } = await supabase
       .from('players')
-      .select('balance')
+      .select('balance, bonus_balance')
       .eq('id', req.player.id)
       .single();
 
@@ -23,7 +23,14 @@ router.get('/balance', auth, async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to fetch balance' });
     }
 
-    return res.json({ success: true, data: { balance: player.balance } });
+    return res.json({
+      success: true,
+      data: {
+        balance: player.balance,
+        bonus_balance: player.bonus_balance || 0,
+        total: (player.balance || 0) + (player.bonus_balance || 0),
+      },
+    });
   } catch (err) {
     console.error('Balance error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch balance' });

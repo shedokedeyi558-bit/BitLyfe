@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS players (
   phone TEXT UNIQUE,
   name TEXT,
   balance INT DEFAULT 0,
+  bonus_balance INT DEFAULT 0,
   games_played INT DEFAULT 0,
   games_won INT DEFAULT 0,
   total_won INT DEFAULT 0,
@@ -22,8 +23,9 @@ CREATE TABLE IF NOT EXISTS players (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Add referral_code to existing players table
+-- Add bonus_balance and referral_code to existing players table
 ALTER TABLE players ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS bonus_balance INT DEFAULT 0;
 
 -- Questions table
 CREATE TABLE IF NOT EXISTS questions (
@@ -81,8 +83,12 @@ CREATE TABLE IF NOT EXISTS transactions (
   amount INT NOT NULL,
   description TEXT,
   reference TEXT,
+  bonus_used INT DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add bonus_used to existing transactions table
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS bonus_used INT DEFAULT 0;
 
 -- Withdrawal requests table
 CREATE TABLE IF NOT EXISTS withdrawal_requests (

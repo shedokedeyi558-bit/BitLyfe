@@ -4,6 +4,7 @@ const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { checkReferralCompletion } = require('./referrals');
+const { deductEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
@@ -327,8 +328,8 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
       entryFeePaid = 0;
       usedTicketId = ticket.id;
     } else {
-      // Deduct entry fee from balance
-      if (player.balance < tournament.entry_fee) {
+      // Deduct entry fee — bonus first, real balance for remainder
+      if ((player.balance || 0) + (player.bonus_balance || 0) < tournament.entry_fee) {
         return res.status(402).json({ success: false, error: 'Insufficient balance' });
       }
 
@@ -338,17 +339,19 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
         return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
       }
 
-      await supabase
-        .from('players')
-        .update({ balance: player.balance - tournament.entry_fee })
-        .eq('id', player.id);
+      let billing;
+      try {
+        billing = await deductEntryFee(player.id, tournament.entry_fee, {
+          type: 'blitz_entry',
+          description: `Blitz tournament entry: ${tournament.title}`,
+        });
+      } catch (billingErr) {
+        if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
+        throw billingErr;
+      }
 
-      await supabase.from('transactions').insert({
-        player_id: player.id,
-        type: 'blitz_entry',
-        amount: -tournament.entry_fee,
-        description: `Blitz tournament entry: ${tournament.title}`,
-      });
+      // Store billing on outer scope for response
+      req._blitzBilling = billing;
     }
 
     // Create registration
@@ -385,7 +388,9 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
         message: 'Successfully registered',
         tournament: { id, title: tournament.title, tournament_start: tournament.tournament_start },
         entryFeePaid,
-        newBalance: ticket_code ? player.balance : player.balance - tournament.entry_fee,
+        newBalance: req._blitzBilling ? req._blitzBilling.newBalance : player.balance,
+        newBonusBalance: req._blitzBilling ? req._blitzBilling.newBonusBalance : player.bonus_balance,
+        bonusUsed: req._blitzBilling ? req._blitzBilling.bonusUsed : 0,
       },
     });
   } catch (err) {

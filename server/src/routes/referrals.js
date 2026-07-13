@@ -71,12 +71,12 @@ async function checkReferralCompletion(refereeId, actionType, depositAmount = 0)
 }
 
 /**
- * Credit referee bonus (15% of first deposit, capped ₦1,000)
- * Credit referrer cash bonus (₦300)
- * Issue referrer a pill ticket (valid 7 days)
+ * Credit referee bonus (15% of first deposit, capped ₦1,000) — credits real balance
+ * Credit referrer bonus_balance += 200 (spendable on any game, winnings always real)
+ * No pill ticket issued for new completions going forward.
  */
 async function distributeReferralRewards(referrerId, refereeId, firstDepositAmount) {
-  // ── Referee bonus: 15% of first deposit, capped ₦1,000 ──────────────────
+  // ── Referee bonus: 15% of first deposit, capped ₦1,000 (real balance) ───
   const refereeBonusRaw = Math.floor(firstDepositAmount * 0.15);
   const refereeBonus = Math.min(refereeBonusRaw, 1000);
 
@@ -93,32 +93,28 @@ async function distributeReferralRewards(referrerId, refereeId, firstDepositAmou
       `₦${refereeBonus.toLocaleString()} credited as a deposit-match bonus for joining via referral.`);
   }
 
-  // ── Referrer cash bonus: ₦300 ────────────────────────────────────────────
-  const referrerCash = 300;
-  const { data: referrer } = await supabase.from('players').select('balance').eq('id', referrerId).single();
-  await supabase.from('players').update({ balance: (referrer?.balance || 0) + referrerCash }).eq('id', referrerId);
+  // ── Referrer reward: ₦200 bonus_balance (usable on any game mode) ────────
+  const referrerBonus = 200;
+  const { data: referrer } = await supabase
+    .from('players')
+    .select('bonus_balance')
+    .eq('id', referrerId)
+    .single();
+
+  await supabase
+    .from('players')
+    .update({ bonus_balance: (referrer?.bonus_balance || 0) + referrerBonus })
+    .eq('id', referrerId);
+
   await supabase.from('transactions').insert({
     player_id: referrerId,
     type: 'referral_bonus',
-    amount: referrerCash,
-    description: `Referral cash bonus — your referral completed their first deposit and game`,
+    amount: referrerBonus,
+    description: `Referral reward — ₦200 bonus balance added (spendable on any game)`,
   });
 
-  // ── Referrer pill ticket (valid 7 days) ───────────────────────────────────
-  const ticketCode = generatePillTicketCode();
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7);
-
-  await supabase.from('pill_tickets').insert({
-    player_id: referrerId,
-    source: 'referral',
-    ticket_code: ticketCode,
-    expires_at: expiresAt.toISOString(),
-    status: 'unused',
-  });
-
-  await createNotification(referrerId, 'win', 'Referral Reward! 🎫',
-    `Your referral is complete! ₦${referrerCash} credited + free pill ticket (code: ${ticketCode}). Valid 7 days.`);
+  await createNotification(referrerId, 'win', 'Referral Reward! 🎁',
+    `Your referral is complete! ₦${referrerBonus} bonus balance added — use it on any game mode.`);
 }
 
 /**
