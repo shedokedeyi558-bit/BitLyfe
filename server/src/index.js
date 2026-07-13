@@ -20,6 +20,7 @@ const notificationsRoutes = require('./routes/notifications');
 const blitzRoutes = require('./routes/blitz');
 const adminBlitzRoutes = require('./routes/adminBlitz');
 const { router: referralsRouter } = require('./routes/referrals');
+const pillsVipRoutes = require('./routes/pillsVip');
 const supabase = require('./db/supabase');
 
 const app = express();
@@ -138,6 +139,7 @@ app.use('/api/game/play', gameLimiter);
 app.use('/api/game/submit', gameLimiter);
 app.use('/api/game', gameRoutes);
 app.use('/api/pills', gameLimiter, pillsRoutes);
+app.use('/api/pills/vip', gameLimiter, pillsVipRoutes);
 app.use('/api/predictions', gameLimiter, predictionsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/blitz', gameLimiter, blitzRoutes);

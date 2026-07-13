@@ -326,30 +326,90 @@ router.post('/submit', auth, async (req, res) => {
 
 /**
  * GET /api/game/recent-winners
- * Last 10 won sessions with masked phone numbers.
+ * Last 20 winners across all game types: doors, pills, predictions, blitz.
+ * Phone numbers masked. Live data — no mock.
  */
 router.get('/recent-winners', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('game_sessions')
-      .select('id, phone, door_id, prize, played_at')
-      .eq('status', 'won')
-      .order('played_at', { ascending: false })
-      .limit(10);
+    // Query all winning transaction types in parallel
+    const [doorRes, pillRes, predRes, blitzRes] = await Promise.all([
+      // Legacy door wins
+      supabase
+        .from('game_sessions')
+        .select('id, phone, door_id, prize, played_at')
+        .eq('status', 'won')
+        .order('played_at', { ascending: false })
+        .limit(20),
+      // Pill wins
+      supabase
+        .from('transactions')
+        .select('id, player_id, amount, created_at, players(phone)')
+        .eq('type', 'pill_win')
+        .order('created_at', { ascending: false })
+        .limit(20),
+      // Prediction wins
+      supabase
+        .from('transactions')
+        .select('id, player_id, amount, created_at, players(phone)')
+        .eq('type', 'prediction_win')
+        .order('created_at', { ascending: false })
+        .limit(20),
+      // Blitz prizes
+      supabase
+        .from('transactions')
+        .select('id, player_id, amount, created_at, players(phone)')
+        .eq('type', 'blitz_prize')
+        .order('created_at', { ascending: false })
+        .limit(20),
+    ]);
 
-    if (error) {
-      return res.status(500).json({ success: false, error: 'Failed to fetch recent winners' });
+    const winners = [];
+
+    for (const session of doorRes.data || []) {
+      winners.push({
+        id: session.id,
+        phone: maskPhone(session.phone),
+        game_type: 'door',
+        prize: session.prize,
+        played_at: session.played_at,
+      });
     }
 
-    const winners = data.map((w) => ({
-      id: w.id,
-      phone: maskPhone(w.phone),
-      doorId: w.door_id,
-      prize: w.prize,
-      playedAt: w.played_at,
-    }));
+    for (const txn of pillRes.data || []) {
+      winners.push({
+        id: txn.id,
+        phone: maskPhone(txn.players?.phone),
+        game_type: 'pill',
+        prize: txn.amount,
+        played_at: txn.created_at,
+      });
+    }
 
-    return res.json({ success: true, data: winners });
+    for (const txn of predRes.data || []) {
+      winners.push({
+        id: txn.id,
+        phone: maskPhone(txn.players?.phone),
+        game_type: 'prediction',
+        prize: txn.amount,
+        played_at: txn.created_at,
+      });
+    }
+
+    for (const txn of blitzRes.data || []) {
+      winners.push({
+        id: txn.id,
+        phone: maskPhone(txn.players?.phone),
+        game_type: 'blitz',
+        prize: txn.amount,
+        played_at: txn.created_at,
+      });
+    }
+
+    // Sort all by most recent, return top 20
+    winners.sort((a, b) => new Date(b.played_at) - new Date(a.played_at));
+    const top20 = winners.slice(0, 20);
+
+    return res.json({ success: true, data: top20 });
   } catch (err) {
     console.error('Recent winners error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch recent winners' });

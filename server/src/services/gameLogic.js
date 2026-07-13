@@ -46,6 +46,10 @@ function checkAnswer(question, playerAnswer) {
     let submitted = playerAnswer.trim();
     let expected = correct_answer.trim();
 
+    // Strip trailing punctuation (period, comma, exclamation, question mark)
+    submitted = submitted.replace(/[.,!?]+$/, '');
+    expected = expected.replace(/[.,!?]+$/, '');
+
     if (!case_sensitive) {
       submitted = submitted.toLowerCase();
       expected = expected.toLowerCase();
@@ -56,7 +60,7 @@ function checkAnswer(question, playerAnswer) {
       return levenshteinDistance(submitted, expected) <= 1;
     }
 
-    // Default: strict exact match
+    // Default: strict exact match (after normalization)
     return submitted === expected;
   }
 

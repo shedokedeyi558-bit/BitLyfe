@@ -67,11 +67,15 @@ router.get('/packs', async (req, res) => {
  */
 router.post('/packs', async (req, res) => {
   try {
-    const { name, category, status, entry_fee, prize } = req.body;
+    const { name, category, status, entry_fee, prize, is_vip } = req.body;
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'name is required' });
     }
+
+    // VIP packs require minimum 10 questions — enforced at creation time
+    // (pills are added after creation, so we just flag the pack type here;
+    //  the activation step will enforce the 10-question minimum)
 
     const { data, error } = await supabase
       .from('pill_packs')
@@ -81,6 +85,7 @@ router.post('/packs', async (req, res) => {
         status: status || 'draft',
         entry_fee: entry_fee !== undefined ? Number(entry_fee) : null,
         prize: prize !== undefined ? Number(prize) : null,
+        is_vip: is_vip === true || is_vip === 'true',
       })
       .select()
       .single();
@@ -102,13 +107,14 @@ router.post('/packs', async (req, res) => {
 router.put('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
-    const { name, category, status, entry_fee, prize } = req.body;
+    const { name, category, status, entry_fee, prize, is_vip } = req.body;
 
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (category !== undefined) updates.category = category;
     if (entry_fee !== undefined) updates.entry_fee = entry_fee === null ? null : Number(entry_fee);
     if (prize !== undefined) updates.prize = prize === null ? null : Number(prize);
+    if (is_vip !== undefined) updates.is_vip = is_vip === true || is_vip === 'true';
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });
@@ -118,6 +124,33 @@ router.put('/packs/:packId', async (req, res) => {
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, error: 'No valid fields to update' });
+    }
+
+    // VIP pack activation: enforce minimum 10 questions
+    if (updates.status === 'active') {
+      const { data: currentPack } = await supabase
+        .from('pill_packs')
+        .select('is_vip')
+        .eq('id', packId)
+        .single();
+
+      if (currentPack?.is_vip) {
+        const { count: pillCount } = await supabase
+          .from('pills')
+          .select('id', { count: 'exact', head: true })
+          .eq('pack_id', packId)
+          .eq('status', 'available');
+
+        if ((pillCount || 0) < 10) {
+          return res.status(400).json({
+            success: false,
+            code: 'INSUFFICIENT_VIP_QUESTIONS',
+            error: `VIP packs require at least 10 questions before activation. This pack has ${pillCount || 0}.`,
+            current_count: pillCount || 0,
+            required: 10,
+          });
+        }
+      }
     }
 
     const { data, error } = await supabase

@@ -514,3 +514,20 @@ CREATE TABLE IF NOT EXISTS referral_milestones (
 );
 
 CREATE INDEX IF NOT EXISTS idx_referral_milestones_player_id ON referral_milestones(player_id);
+
+-- ─── VIP PILL ATTEMPTS TABLE ──────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS vip_attempts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE NOT NULL,
+  pack_id UUID REFERENCES pill_packs(id) ON DELETE CASCADE NOT NULL,
+  current_question_index INTEGER NOT NULL DEFAULT 0,
+  status TEXT CHECK (status IN ('in_progress', 'won', 'failed')) DEFAULT 'in_progress',
+  started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  completed_at TIMESTAMP WITH TIME ZONE,
+  UNIQUE(player_id, pack_id)   -- one active attempt per player per pack
+);
+
+CREATE INDEX IF NOT EXISTS idx_vip_attempts_player_id ON vip_attempts(player_id);
+CREATE INDEX IF NOT EXISTS idx_vip_attempts_pack_id ON vip_attempts(pack_id);
+CREATE INDEX IF NOT EXISTS idx_vip_attempts_status ON vip_attempts(status);
