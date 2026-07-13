@@ -15,7 +15,8 @@ const auth = async (req, res, next) => {
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
-      return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+      const code = err.name === 'TokenExpiredError' ? 'SESSION_EXPIRED' : 'INVALID_TOKEN';
+      return res.status(401).json({ success: false, code, error: code === 'SESSION_EXPIRED' ? 'Session expired — please log in again' : 'Invalid token' });
     }
 
     // Fetch player from DB to ensure they're still active

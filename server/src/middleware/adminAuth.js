@@ -15,7 +15,8 @@ const adminAuth = async (req, res, next) => {
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
-      return res.status(401).json({ success: false, error: 'Invalid or expired admin token' });
+      const code = err.name === 'TokenExpiredError' ? 'SESSION_EXPIRED' : 'INVALID_TOKEN';
+      return res.status(401).json({ success: false, code, error: code === 'SESSION_EXPIRED' ? 'Admin session expired — please log in again' : 'Invalid or expired admin token' });
     }
 
     // Support both old format (adminId) and new format (playerId with is_admin)

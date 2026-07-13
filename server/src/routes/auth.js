@@ -547,7 +547,7 @@ router.post('/admin-login', async (req, res) => {
         const token = jwt.sign(
           { playerId: player.id, adminId: player.id, email: player.email, is_admin: true },
           process.env.JWT_SECRET,
-          { expiresIn: '7d' }
+          { expiresIn: '30m' }   // 30-minute admin sessions
         );
         return res.json({
           success: true,
@@ -577,7 +577,7 @@ router.post('/admin-login', async (req, res) => {
     }
 
     const token = jwt.sign({ adminId: admin.id, email: admin.email }, process.env.JWT_SECRET, {
-      expiresIn: '7d',
+      expiresIn: '30m',    // 30-minute admin sessions
     });
 
     return res.json({

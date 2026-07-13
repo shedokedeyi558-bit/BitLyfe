@@ -2,6 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
 const { checkReferralCompletion } = require('./referrals');
 
 const router = express.Router();
@@ -256,9 +257,9 @@ router.get('/:id/prize-estimate', auth, async (req, res) => {
 /**
  * POST /api/blitz/:id/register
  * Register player for tournament. Deducts entry fee or validates free ticket from blitz_tickets.
- * Body: { ticket_code? }
+ * Body: { ticket_code?, idempotency_key? }
  */
-router.post('/:id/register', auth, async (req, res) => {
+router.post('/:id/register', idempotency(), auth, async (req, res) => {
   try {
     const { id } = req.params;
     const { ticket_code } = req.body;

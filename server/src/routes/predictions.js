@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
+const idempotency = require('../middleware/idempotency');
 const { checkReferralCompletion } = require('./referrals');
 
 const router = express.Router();
@@ -128,9 +129,9 @@ router.get('/active', auth, async (req, res) => {
 /**
  * POST /api/predictions/enter
  * Join a prediction by deducting entry fee
- * Body: { predictionId }
+ * Body: { predictionId, idempotency_key? }
  */
-router.post('/enter', auth, async (req, res) => {
+router.post('/enter', idempotency(), auth, async (req, res) => {
   try {
     const { predictionId } = req.body;
     const player = req.player;
@@ -173,21 +174,35 @@ router.post('/enter', auth, async (req, res) => {
       return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
     }
 
-    // Check if already participated
+    // Check if already participated — idempotency: return existing state, never double-charge
     const { data: existing } = await supabase
       .from('prediction_participations')
-      .select('id, answer')
+      .select('id, answer, submitted_at')
       .eq('prediction_id', predictionId)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (existing) {
-      // Already entered — tell frontend clearly so it can skip to submit step
-      return res.status(409).json({
-        success: false,
-        error: 'Already entered this prediction',
+      // Already paid — route frontend to the correct step based on answer state
+      return res.json({
+        success: true,
         already_entered: true,
-        has_submitted: existing.answer !== null,
+        data: {
+          prediction: {
+            id: prediction.id,
+            question: prediction.question,
+            category: prediction.category,
+            fee: parseFloat(prediction.entry_fee),
+            prize_per_winner: parseFloat(prediction.prize_per_winner),
+            slots_filled: prediction.current_participants,
+            max_slots: prediction.max_participants,
+            countdown_end: prediction.countdown_end_time,
+            status: prediction.status,
+          },
+          participation_state: existing.answer !== null ? 'submitted_waiting' : 'entered_not_submitted',
+          has_submitted: existing.answer !== null,
+          newBalance: player.balance, // balance unchanged — already charged
+        },
       });
     }
 
@@ -300,6 +315,139 @@ router.post('/submit', auth, async (req, res) => {
   } catch (err) {
     console.error('Submit prediction error:', err);
     return res.status(500).json({ success: false, error: 'Failed to submit prediction' });
+  }
+});
+
+/**
+ * GET /api/predictions/:id/my-participation
+ * Single source of truth for a player's state in a prediction.
+ * States: never_entered | entered_not_submitted | submitted_waiting | result_available
+ */
+router.get('/:id/my-participation', auth, async (req, res) => {
+  try {
+    const { id: predictionId } = req.params;
+    const player = req.player;
+
+    const { data: prediction, error: predErr } = await supabase
+      .from('predictions')
+      .select('id, question, category, entry_fee, prize_per_winner, max_participants, current_participants, countdown_end_time, status, correct_answer, event_date')
+      .eq('id', predictionId)
+      .single();
+
+    if (predErr || !prediction) {
+      return res.status(404).json({ success: false, error: 'Prediction not found' });
+    }
+
+    const { data: participation } = await supabase
+      .from('prediction_participations')
+      .select('id, answer, submitted_at, is_correct, amount_won')
+      .eq('prediction_id', predictionId)
+      .eq('player_id', player.id)
+      .maybeSingle();
+
+    // Determine state
+    let state;
+    if (!participation) {
+      state = 'never_entered';
+    } else if (participation.answer === null) {
+      state = 'entered_not_submitted';
+    } else if (prediction.status !== 'completed' || !prediction.correct_answer) {
+      state = 'submitted_waiting';
+    } else {
+      state = 'result_available';
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        state,
+        prediction: {
+          id: prediction.id,
+          question: prediction.question,
+          category: prediction.category,
+          fee: parseFloat(prediction.entry_fee),
+          prize_per_winner: parseFloat(prediction.prize_per_winner),
+          slots_filled: prediction.current_participants,
+          max_slots: prediction.max_participants,
+          countdown_end: prediction.countdown_end_time,
+          status: prediction.status,
+          event_date: prediction.event_date || null,
+        },
+        participation: participation ? {
+          answer: participation.answer,
+          submitted_at: participation.submitted_at,
+          is_correct: participation.is_correct,
+          amount_won: parseFloat(participation.amount_won || 0),
+        } : null,
+      },
+    });
+  } catch (err) {
+    console.error('My-participation error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch participation state' });
+  }
+});
+
+/**
+ * POST /api/predictions/refund-expired
+ * Auto-refund entry fees for participations with no submitted answer
+ * on predictions that have passed their countdown deadline.
+ * Called by admin or a scheduled task — idempotent (checks for existing refund transaction).
+ */
+router.post('/refund-expired', adminAuth, async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+
+    // Find predictions that are locked/completed with unsubmitted participations
+    const { data: stuckParticipations } = await supabase
+      .from('prediction_participations')
+      .select('id, player_id, prediction_id, predictions(entry_fee, question, countdown_end_time, status)')
+      .is('answer', null)
+      .is('submitted_at', null);
+
+    if (!stuckParticipations || stuckParticipations.length === 0) {
+      return res.json({ success: true, data: { refunded: 0, message: 'No stuck participations found' } });
+    }
+
+    let refundCount = 0;
+
+    for (const part of stuckParticipations) {
+      const pred = part.predictions;
+      if (!pred) continue;
+
+      // Only refund if deadline has passed
+      const deadlinePassed = new Date(pred.countdown_end_time) < new Date(now);
+      if (!deadlinePassed) continue;
+
+      // Idempotency: skip if already refunded
+      const { data: existingRefund } = await supabase
+        .from('transactions')
+        .select('id')
+        .eq('player_id', part.player_id)
+        .eq('type', 'prediction_refund')
+        .like('description', `%${part.prediction_id}%`)
+        .maybeSingle();
+
+      if (existingRefund) continue;
+
+      const entryFee = parseFloat(pred.entry_fee);
+
+      // Credit refund
+      const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', part.player_id).single();
+      await supabase.from('players').update({ balance: (freshPlayer?.balance || 0) + entryFee }).eq('id', part.player_id);
+      await supabase.from('transactions').insert({
+        player_id: part.player_id,
+        type: 'prediction_refund',
+        amount: entryFee,
+        description: `Auto-refund: prediction ${part.prediction_id} expired without answer submission`,
+      });
+
+      refundCount++;
+    }
+
+    return res.json({ success: true, data: { refunded: refundCount } });
+  } catch (err) {
+    console.error('Refund expired predictions error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to process refunds' });
   }
 });
 

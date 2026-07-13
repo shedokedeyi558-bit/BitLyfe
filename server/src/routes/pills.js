@@ -3,6 +3,7 @@ const { checkReferralCompletion } = require('./referrals');
 const express = require('express');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
 const { checkAnswer } = require('../services/gameLogic');
 
 const router = express.Router();
@@ -214,9 +215,9 @@ router.get('/available', auth, async (req, res) => {
  * Deduct entry fee and open a pill (reveal question).
  * Uses pill_plays table for per-player tracking so the global pill
  * status stays "available" for other players.
- * Body: { pillId }
+ * Body: { pillId, idempotency_key? }
  */
-router.post('/open', auth, async (req, res) => {
+router.post('/open', idempotency(), auth, async (req, res) => {
   try {
     const { pillId } = req.body;
     const player = req.player;
