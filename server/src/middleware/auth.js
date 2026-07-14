@@ -19,10 +19,10 @@ const auth = async (req, res, next) => {
       return res.status(401).json({ success: false, code, error: code === 'SESSION_EXPIRED' ? 'Session expired — please log in again' : 'Invalid token' });
     }
 
-    // Fetch player from DB to ensure they're still active
+    // Fetch player from DB to ensure they're still active and token_version matches
     const { data: player, error } = await supabase
       .from('players')
-      .select('id, phone, name, balance, bonus_balance, status')
+      .select('id, phone, name, balance, bonus_balance, status, token_version')
       .eq('id', decoded.playerId)
       .single();
 
@@ -32,6 +32,17 @@ const auth = async (req, res, next) => {
 
     if (player.status === 'banned') {
       return res.status(403).json({ success: false, error: 'Your account has been banned' });
+    }
+
+    // Token version check — fails if password was reset or logout-all was called
+    const tokenVersion = decoded.token_version ?? 0;
+    const storedVersion = player.token_version ?? 0;
+    if (tokenVersion !== storedVersion) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_INVALIDATED',
+        error: 'Session has been invalidated. Please log in again.',
+      });
     }
 
     req.player = player;

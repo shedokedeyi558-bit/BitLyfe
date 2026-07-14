@@ -9,6 +9,46 @@ const router = express.Router();
 // In-memory OTP store (replace with Redis or DB in production)
 const otpStore = new Map();
 
+// In-memory store for password-reset OTPs: phone → { otp, expires }
+const resetOtpStore = new Map();
+
+// In-memory store for password-reset tokens: token → { playerId, expires }
+const resetTokenStore = new Map();
+
+// Per-phone rate-limit tracker for auth endpoints: phone → [timestamp, ...]
+const authAttemptStore = new Map();
+
+// ─── AUTH RATE LIMITER ────────────────────────────────────────────────────────
+// 5 attempts per phone per 15-minute window.
+// Call this BEFORE doing any real work; it returns null when allowed,
+// or a { status, body } object to return immediately when blocked.
+function checkAuthRateLimit(phone) {
+  const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+  const MAX_ATTEMPTS = 5;
+  const now = Date.now();
+
+  const attempts = (authAttemptStore.get(phone) || []).filter((t) => now - t < WINDOW_MS);
+  attempts.push(now);
+  authAttemptStore.set(phone, attempts);
+
+  if (attempts.length > MAX_ATTEMPTS) {
+    const oldestInWindow = attempts[attempts.length - MAX_ATTEMPTS - 1];
+    const retryAfterMs = WINDOW_MS - (now - oldestInWindow);
+    const retryAfterSeconds = Math.ceil(retryAfterMs / 1000);
+    return {
+      status: 429,
+      body: {
+        success: false,
+        code: 'TOO_MANY_ATTEMPTS',
+        error: 'Too many attempts. Please try again later.',
+        retry_after_seconds: retryAfterSeconds,
+      },
+    };
+  }
+
+  return null; // allowed
+}
+
 /**
  * Generate a unique 6-char alphanumeric referral code
  * Retries up to 5 times on collision (astronomically unlikely)
@@ -62,11 +102,17 @@ function normalizePhone(phone) {
 }
 
 /**
- * Generate JWT token
+ * Generate JWT token — includes token_version so server-side invalidation works.
+ * token_version defaults to 0 if not present (existing rows without the column).
  */
 function generateToken(player) {
   return jwt.sign(
-    { playerId: player.id, email: player.email, is_admin: player.is_admin },
+    {
+      playerId: player.id,
+      email: player.email,
+      is_admin: player.is_admin,
+      token_version: player.token_version ?? 0,
+    },
     process.env.JWT_SECRET,
     { expiresIn: '30d' }
   );
@@ -104,8 +150,13 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid phone number format' });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
     const normalizedPhone = normalizePhone(phone);
+
+    // Rate limit by phone
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
+    const normalizedEmail = email.trim().toLowerCase();
 
     const { data: existingEmail } = await supabase
       .from('players')
@@ -230,10 +281,14 @@ router.post('/signin', async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
 
+    // Rate limit by email (use as identifier)
+    const rateLimitResult = checkAuthRateLimit(normalizedEmail);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
     // Fetch player by email
     const { data: player, error } = await supabase
       .from('players')
-      .select('id, email, password_hash, phone, name, balance, is_admin, status')
+      .select('id, email, password_hash, phone, name, balance, is_admin, status, token_version')
       .eq('email', normalizedEmail)
       .single();
 
@@ -399,6 +454,10 @@ router.post('/verify-otp', async (req, res) => {
 
     const normalizedPhone = normalizePhone(phone);
 
+    // Rate limit
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
     // MVP: accept any 6-digit OTP
     if (!/^\d{6}$/.test(otp)) {
       return res.status(400).json({ success: false, error: 'OTP must be a 6-digit number' });
@@ -409,7 +468,7 @@ router.post('/verify-otp', async (req, res) => {
     // Fetch player
     const { data: player, error } = await supabase
       .from('players')
-      .select('id, phone, name, balance, status, is_admin')
+      .select('id, phone, name, balance, status, is_admin, token_version')
       .eq('phone', normalizedPhone)
       .single();
 
@@ -430,11 +489,7 @@ router.post('/verify-otp', async (req, res) => {
         .eq('id', player.id);
     }
 
-    const token = jwt.sign(
-      { playerId: player.id, is_admin: player.is_admin },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    const token = generateToken(player);
 
     return res.json({
       success: true,
@@ -469,10 +524,14 @@ router.post('/phone-signin', async (req, res) => {
 
     const normalizedPhone = normalizePhone(phone);
 
+    // Rate limit
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
     // Fetch player by phone
     const { data: player, error } = await supabase
       .from('players')
-      .select('id, phone, password_hash, name, balance, is_admin, status')
+      .select('id, phone, password_hash, name, balance, is_admin, status, token_version')
       .eq('phone', normalizedPhone)
       .single();
 
@@ -497,11 +556,7 @@ router.post('/phone-signin', async (req, res) => {
     }
 
     // Generate token (same shape as verify-otp)
-    const token = jwt.sign(
-      { playerId: player.id, is_admin: player.is_admin },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    const token = generateToken(player);
 
     return res.json({
       success: true,
@@ -590,6 +645,228 @@ router.post('/admin-login', async (req, res) => {
   } catch (err) {
     console.error('Admin login error:', err);
     return res.status(500).json({ success: false, error: 'Admin login failed' });
+  }
+});
+
+// ─── FORGOT PASSWORD FLOW ─────────────────────────────────────────────────────
+
+/**
+ * POST /api/auth/forgot-password
+ * Generate and send a 6-digit OTP to the player's phone.
+ * Rate-limited: 5 attempts per phone per 15 min.
+ */
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ success: false, error: 'phone is required' });
+
+    const normalizedPhone = normalizePhone(phone);
+
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
+    // Always respond the same way whether the phone exists or not (prevents enumeration)
+    const { data: player } = await supabase
+      .from('players')
+      .select('id')
+      .eq('phone', normalizedPhone)
+      .maybeSingle();
+
+    if (player) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      resetOtpStore.set(normalizedPhone, { otp, expires: Date.now() + 5 * 60 * 1000 });
+      // Reuse existing SMS infra — currently console.log (MVP)
+      console.log(`[RESET OTP] ${normalizedPhone} → ${otp}`);
+    }
+
+    return res.json({
+      success: true,
+      data: { message: 'If that phone number is registered, an OTP has been sent.' },
+    });
+  } catch (err) {
+    console.error('Forgot-password error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to process request' });
+  }
+});
+
+/**
+ * POST /api/auth/verify-reset-otp
+ * Validate the reset OTP. Returns a short-lived reset token (10 min).
+ * Rate-limited: 5 attempts per phone per 15 min.
+ */
+router.post('/verify-reset-otp', async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    if (!phone || !otp) {
+      return res.status(400).json({ success: false, error: 'phone and otp are required' });
+    }
+
+    const normalizedPhone = normalizePhone(phone);
+
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
+    const entry = resetOtpStore.get(normalizedPhone);
+    if (!entry || Date.now() > entry.expires || entry.otp !== String(otp)) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired OTP' });
+    }
+
+    // Consume OTP — single use
+    resetOtpStore.delete(normalizedPhone);
+
+    // Fetch player to bind token to their ID
+    const { data: player } = await supabase
+      .from('players')
+      .select('id')
+      .eq('phone', normalizedPhone)
+      .maybeSingle();
+
+    if (!player) {
+      return res.status(404).json({ success: false, error: 'Player not found' });
+    }
+
+    // Generate a short-lived reset token
+    const resetToken = require('crypto').randomBytes(32).toString('hex');
+    resetTokenStore.set(resetToken, { playerId: player.id, expires: Date.now() + 10 * 60 * 1000 });
+
+    return res.json({
+      success: true,
+      data: { reset_token: resetToken },
+    });
+  } catch (err) {
+    console.error('Verify-reset-otp error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to verify OTP' });
+  }
+});
+
+/**
+ * POST /api/auth/reset-password
+ * Reset password using a valid reset token.
+ * Increments token_version to invalidate all existing sessions.
+ */
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { reset_token, new_password } = req.body;
+    if (!reset_token || !new_password) {
+      return res.status(400).json({ success: false, error: 'reset_token and new_password are required' });
+    }
+
+    if (new_password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    }
+
+    const entry = resetTokenStore.get(reset_token);
+    if (!entry || Date.now() > entry.expires) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired reset token' });
+    }
+
+    // Consume token — single use
+    resetTokenStore.delete(reset_token);
+
+    const { playerId } = entry;
+    const password_hash = await bcrypt.hash(new_password, 10);
+
+    // Fetch current token_version
+    const { data: player } = await supabase
+      .from('players')
+      .select('token_version')
+      .eq('id', playerId)
+      .single();
+
+    const newVersion = (player?.token_version ?? 0) + 1;
+
+    await supabase
+      .from('players')
+      .update({ password_hash, token_version: newVersion })
+      .eq('id', playerId);
+
+    return res.json({
+      success: true,
+      data: { message: 'Password reset successful. Please log in again.' },
+    });
+  } catch (err) {
+    console.error('Reset-password error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to reset password' });
+  }
+});
+
+// ─── CHANGE PASSWORD (LOGGED IN) ─────────────────────────────────────────────
+
+/**
+ * POST /api/auth/change-password
+ * Change password while authenticated. Requires current password confirmation.
+ * Does NOT invalidate other sessions — use /logout-all for that.
+ */
+router.post('/change-password', require('../middleware/auth'), async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body;
+    const player = req.player;
+
+    if (!current_password || !new_password) {
+      return res.status(400).json({ success: false, error: 'current_password and new_password are required' });
+    }
+
+    if (new_password.length < 6) {
+      return res.status(400).json({ success: false, error: 'New password must be at least 6 characters' });
+    }
+
+    // Fetch the hash — auth middleware only selects limited fields
+    const { data: full } = await supabase
+      .from('players')
+      .select('password_hash')
+      .eq('id', player.id)
+      .single();
+
+    if (!full?.password_hash) {
+      return res.status(400).json({ success: false, error: 'No password set on this account' });
+    }
+
+    const match = await bcrypt.compare(current_password, full.password_hash);
+    if (!match) {
+      return res.status(401).json({ success: false, error: 'Current password is incorrect' });
+    }
+
+    const password_hash = await bcrypt.hash(new_password, 10);
+    await supabase.from('players').update({ password_hash }).eq('id', player.id);
+
+    return res.json({
+      success: true,
+      data: { message: 'Password changed successfully.' },
+    });
+  } catch (err) {
+    console.error('Change-password error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to change password' });
+  }
+});
+
+// ─── LOGOUT ALL ───────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/auth/logout-all
+ * Increments token_version, immediately invalidating every token issued for this account.
+ * Client should discard its token after calling this.
+ */
+router.post('/logout-all', require('../middleware/auth'), async (req, res) => {
+  try {
+    const player = req.player;
+
+    const { data: full } = await supabase
+      .from('players')
+      .select('token_version')
+      .eq('id', player.id)
+      .single();
+
+    const newVersion = (full?.token_version ?? 0) + 1;
+
+    await supabase.from('players').update({ token_version: newVersion }).eq('id', player.id);
+
+    return res.json({
+      success: true,
+      data: { message: 'All sessions invalidated. Please log in again.' },
+    });
+  } catch (err) {
+    console.error('Logout-all error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to invalidate sessions' });
   }
 });
 
