@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS players (
   is_admin BOOLEAN DEFAULT false,
   status TEXT DEFAULT 'active',
   referral_code TEXT UNIQUE,
+  token_version INT DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS players (
 -- Add bonus_balance and referral_code to existing players table
 ALTER TABLE players ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS bonus_balance INT DEFAULT 0;
+ALTER TABLE players ADD COLUMN IF NOT EXISTS token_version INT DEFAULT 0;
 
 -- Questions table
 CREATE TABLE IF NOT EXISTS questions (
