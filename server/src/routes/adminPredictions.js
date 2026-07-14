@@ -285,7 +285,7 @@ router.post('/:id/cancel', async (req, res) => {
 
 /**
  * GET /api/admin/predictions/:id/participations
- * View all participations for a prediction
+ * View all participations for a prediction (raw, paginated)
  */
 router.get('/:id/participations', async (req, res) => {
   try {
@@ -314,6 +314,80 @@ router.get('/:id/participations', async (req, res) => {
   } catch (err) {
     console.error('Get participations error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch participations' });
+  }
+});
+
+/**
+ * GET /api/admin/predictions/:id/participants
+ * Review all participants before revealing an answer.
+ * Returns masked phone, submitted answer, and submission timestamp.
+ * Participants who entered but haven't submitted yet are included (answer will be null).
+ */
+router.get('/:id/participants', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Verify prediction exists
+    const { data: prediction, error: predErr } = await supabase
+      .from('predictions')
+      .select('id, question, status, current_participants')
+      .eq('id', id)
+      .single();
+
+    if (predErr || !prediction) {
+      return res.status(404).json({ success: false, error: 'Prediction not found' });
+    }
+
+    const { data: participations, error } = await supabase
+      .from('prediction_participations')
+      .select('id, answer, submitted_at, created_at, players(phone, name)')
+      .eq('prediction_id', id)
+      .order('submitted_at', { ascending: true, nullsFirst: false });
+
+    if (error) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
+    }
+
+    const participants = (participations || []).map((p) => {
+      const phone = p.players?.phone || '';
+      // Mask: keep first 4 and last 2 digits, replace middle with ***
+      const masked = phone.length >= 6
+        ? `${phone.slice(0, 4)}***${phone.slice(-2)}`
+        : '***';
+
+      return {
+        id: p.id,
+        phone: masked,
+        name: p.players?.name || null,
+        answer: p.answer || null,
+        submitted_at: p.submitted_at || null,
+        has_submitted: p.answer !== null,
+        entered_at: p.created_at,
+      };
+    });
+
+    const submittedCount = participants.filter((p) => p.has_submitted).length;
+    const pendingCount = participants.length - submittedCount;
+
+    return res.json({
+      success: true,
+      data: {
+        prediction: {
+          id: prediction.id,
+          question: prediction.question,
+          status: prediction.status,
+        },
+        summary: {
+          total: participants.length,
+          submitted: submittedCount,
+          pending_submission: pendingCount,
+        },
+        participants,
+      },
+    });
+  } catch (err) {
+    console.error('Get prediction participants error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
   }
 });
 
