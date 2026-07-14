@@ -455,6 +455,122 @@ router.post('/refund-expired', adminAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/predictions/my-predictions?status=active|settled
+ * Returns all predictions the authenticated player has entered, split by status.
+ *
+ * active  — prediction outcome not yet revealed; player entered (with or without an answer)
+ *           Fields: id, question, category, entry_fee, prize_per_winner, my_answer,
+ *                   state (entered_not_submitted | submitted_waiting), countdown_end, needs_submission
+ *           Order: soonest countdown_end first
+ *
+ * settled — prediction is completed and correct_answer is set; player participated
+ *           Fields: id, question, category, my_answer, correct_answer, won, amount_won, completed_at
+ *           Order: most recently completed first
+ */
+router.get('/my-predictions', auth, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const player = req.player;
+
+    if (!status || !['active', 'settled'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'Query param status must be "active" or "settled"' });
+    }
+
+    // Fetch all participations for this player, joining the prediction
+    const { data: participations, error } = await supabase
+      .from('prediction_participations')
+      .select(`
+        id,
+        answer,
+        submitted_at,
+        is_correct,
+        amount_won,
+        created_at,
+        predictions (
+          id,
+          question,
+          category,
+          entry_fee,
+          prize_per_winner,
+          countdown_end_time,
+          status,
+          correct_answer,
+          updated_at
+        )
+      `)
+      .eq('player_id', player.id);
+
+    if (error) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch predictions' });
+    }
+
+    let predictions;
+
+    if (status === 'active') {
+      // Active: prediction hasn't been revealed yet (no correct_answer, or status not completed)
+      const active = (participations || []).filter((p) => {
+        const pred = p.predictions;
+        return pred && (pred.status !== 'completed' || !pred.correct_answer);
+      });
+
+      // Order by soonest countdown_end first
+      active.sort((a, b) =>
+        new Date(a.predictions.countdown_end_time) - new Date(b.predictions.countdown_end_time)
+      );
+
+      predictions = active.map((p) => {
+        const pred = p.predictions;
+        const hasSubmitted = p.answer !== null;
+        const state = hasSubmitted ? 'submitted_waiting' : 'entered_not_submitted';
+
+        return {
+          id: pred.id,
+          question: pred.question,
+          category: pred.category,
+          entry_fee: parseFloat(pred.entry_fee),
+          prize_per_winner: parseFloat(pred.prize_per_winner),
+          my_answer: p.answer || null,
+          state,
+          countdown_end: pred.countdown_end_time,
+          needs_submission: !hasSubmitted,
+        };
+      });
+    } else {
+      // Settled: prediction completed with correct_answer revealed
+      const settled = (participations || []).filter((p) => {
+        const pred = p.predictions;
+        return pred && pred.status === 'completed' && pred.correct_answer;
+      });
+
+      // Order by most recently completed (use updated_at as proxy for completed_at)
+      settled.sort((a, b) =>
+        new Date(b.predictions.updated_at) - new Date(a.predictions.updated_at)
+      );
+
+      predictions = settled.map((p) => {
+        const pred = p.predictions;
+
+        return {
+          id: pred.id,
+          question: pred.question,
+          category: pred.category,
+          my_answer: p.answer || null,
+          correct_answer: pred.correct_answer,
+          won: p.is_correct === true,
+          amount_won: parseFloat(p.amount_won || 0),
+          completed_at: pred.updated_at,
+        };
+      });
+    }
+
+    return res.json({ success: true, data: { predictions } });
+  } catch (err) {
+    console.error('My-predictions error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch my predictions' });
+  }
+});
+
+/**
  * GET /api/predictions/my-answer/:id
  * Returns the authenticated player's submitted answer for a prediction
  */
