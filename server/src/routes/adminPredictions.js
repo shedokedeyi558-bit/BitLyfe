@@ -88,6 +88,83 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * GET /api/admin/predictions/:id
+ * Single prediction detail — same shape as entries in GET /api/admin/games,
+ * plus participants_summary: { total, submitted, pending_submission }
+ */
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: prediction, error } = await supabase
+      .from('predictions')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !prediction) {
+      return res.status(404).json({ success: false, error: 'Prediction not found' });
+    }
+
+    // participants_summary — count directly, no need to fetch all rows
+    const [totalRes, submittedRes] = await Promise.all([
+      supabase
+        .from('prediction_participations')
+        .select('id', { count: 'exact', head: true })
+        .eq('prediction_id', id),
+      supabase
+        .from('prediction_participations')
+        .select('id', { count: 'exact', head: true })
+        .eq('prediction_id', id)
+        .not('answer', 'is', null),
+    ]);
+
+    const total     = totalRes.count     || 0;
+    const submitted = submittedRes.count || 0;
+
+    // Match the formatPrediction shape from GET /api/admin/games
+    const now = Date.now();
+    const countdownEnd = new Date(prediction.countdown_end_time).getTime();
+
+    return res.json({
+      success: true,
+      data: {
+        prediction: {
+          id: prediction.id,
+          game_type: 'predictions',
+          title: prediction.question,
+          question: prediction.question,
+          category: prediction.category,
+          status: prediction.status,
+          entry_fee: Number(prediction.entry_fee),
+          fee: Number(prediction.entry_fee),
+          prize_per_winner: Number(prediction.prize_per_winner),
+          max_slots: prediction.max_participants,
+          slots_filled: prediction.current_participants,
+          countdown_end: prediction.countdown_end_time,
+          countdown_remaining_seconds: Math.max(0, Math.floor((countdownEnd - now) / 1000)),
+          correct_answer: prediction.correct_answer || null,
+          event_date: prediction.event_date || null,
+          created_at: prediction.created_at,
+          stats: {
+            total_players: prediction.current_participants,
+            revenue: prediction.current_participants * Number(prediction.entry_fee),
+          },
+          participants_summary: {
+            total,
+            submitted,
+            pending_submission: total - submitted,
+          },
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Get single prediction error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch prediction' });
+  }
+});
+
+/**
  * PUT /api/admin/predictions/:id
  * Update a prediction (question, prize, etc.)
  */
