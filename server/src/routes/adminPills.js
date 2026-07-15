@@ -131,13 +131,18 @@ router.post('/packs', async (req, res) => {
 
 /**
  * PUT /api/admin/pills/packs/:packId/feature
- * Set this pack as the featured pack (is_featured = true).
- * Simultaneously clears is_featured on all other standard packs.
+ * Set or unset featured status. Body: { featured: boolean }
+ * Setting featured: true on one pack unsets is_featured on every other standard pack.
  * Only allowed on standard packs — not Specials.
  */
 router.put('/packs/:packId/feature', async (req, res) => {
   try {
     const { packId } = req.params;
+    const { featured } = req.body;
+
+    if (featured === undefined || featured === null) {
+      return res.status(400).json({ success: false, error: 'featured (boolean) is required in request body' });
+    }
 
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
@@ -158,40 +163,45 @@ router.put('/packs/:packId/feature', async (req, res) => {
       });
     }
 
-    if (pack.status !== 'active') {
+    if (featured && pack.status !== 'active') {
       return res.status(400).json({
         success: false,
         error: 'Only active packs can be featured',
       });
     }
 
-    // Clear is_featured on all other standard packs first
-    await supabase
-      .from('pill_packs')
-      .update({ is_featured: false })
-      .or('pack_type.eq.standard,pack_type.is.null')
-      .eq('is_vip', false)
-      .neq('id', packId);
+    // If setting featured: true, clear is_featured on all other standard packs first
+    if (featured) {
+      await supabase
+        .from('pill_packs')
+        .update({ is_featured: false })
+        .or('pack_type.eq.standard,pack_type.is.null')
+        .eq('is_vip', false)
+        .neq('id', packId);
+    }
 
-    // Set this pack as featured
+    // Apply the new featured value
     const { data: updated, error: updateErr } = await supabase
       .from('pill_packs')
-      .update({ is_featured: true })
+      .update({ is_featured: Boolean(featured) })
       .eq('id', packId)
       .select()
       .single();
 
     if (updateErr) {
-      return res.status(500).json({ success: false, error: 'Failed to set featured pack' });
+      return res.status(500).json({ success: false, error: 'Failed to update featured status' });
     }
 
     return res.json({
       success: true,
-      data: { pack: updated, message: `"${pack.name}" is now the featured pack` },
+      data: {
+        pack: updated,
+        message: featured ? `"${pack.name}" is now the featured pack` : `"${pack.name}" is no longer featured`,
+      },
     });
   } catch (err) {
     console.error('Feature pack error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to feature pack' });
+    return res.status(500).json({ success: false, error: 'Failed to update featured status' });
   }
 });
 

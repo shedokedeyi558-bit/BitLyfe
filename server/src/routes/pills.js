@@ -180,6 +180,50 @@ router.get('/packs', auth, async (req, res) => {
 });
 
 /**
+ * GET /api/pills/specials
+ * Returns all active Special packs for the player-facing Specials section.
+ * Includes packs where pack_type = 'special' OR is_vip = true (legacy flag).
+ * Does NOT include pills — specials use the start endpoint, not individual pill selection.
+ */
+router.get('/specials', auth, async (req, res) => {
+  try {
+    const { data: packs, error } = await supabase
+      .from('pill_packs')
+      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end')
+      .eq('status', 'active')
+      .or('pack_type.eq.special,is_vip.eq.true')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch specials' });
+    }
+
+    const now = new Date();
+    const result = (packs || [])
+      .filter((p) => !p.entry_window_end || new Date(p.entry_window_end) > now)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        status: p.status,
+        is_vip: true,                    // always true for specials — frontend checks this
+        pack_type: p.pack_type || 'special',
+        entry_fee: p.entry_fee ? parseFloat(p.entry_fee) : null,
+        prize: p.prize ? parseFloat(p.prize) : null,
+        question_count: p.question_count || null,
+        total_time_seconds: p.total_time_seconds || null,
+        required_correct: p.required_correct || null,
+        entry_window_end: p.entry_window_end || null,
+      }));
+
+    return res.json({ success: true, data: { specials: result } });
+  } catch (err) {
+    console.error('Get specials error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch specials' });
+  }
+});
+
+/**
  * GET /api/pills/available
  * Returns all available pills (legacy endpoint, kept for compatibility)
  */
