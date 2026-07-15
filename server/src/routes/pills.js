@@ -92,15 +92,12 @@ router.get('/packs', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
 
-    // Fetch active STANDARD packs only — exclude Specials (pack_type='special' or is_vip=true)
-    // Use select with filter: pack_type = 'standard' OR (pack_type is null AND is_vip = false)
-    // Simplest safe filter: exclude anything flagged as special or vip
+    // Fetch all active packs — standard and specials together.
+    // Frontend uses is_vip to distinguish specials from standard packs.
     const { data: packs, error: packsErr } = await supabase
       .from('pill_packs')
       .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, is_featured')
       .eq('status', 'active')
-      .or('pack_type.eq.standard,pack_type.is.null')
-      .eq('is_vip', false)
       .order('is_featured', { ascending: false })  // featured pack sorts first
       .order('created_at', { ascending: false });
 
@@ -166,8 +163,8 @@ router.get('/packs', auth, async (req, res) => {
         category: pack.category,
         status: pack.status,
         is_featured: pack.is_featured || false,
-        is_vip: false,          // always false here — specials are on GET /api/pills/specials
-        pack_type: 'standard',  // always standard here
+        is_vip: pack.is_vip || false,        // actual DB value — true for Specials
+        pack_type: pack.pack_type || 'standard',
         entry_fee: pack.entry_fee !== null && pack.entry_fee !== undefined ? parseFloat(pack.entry_fee) : null,
         prize: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
         pills: pillsByPack[pack.id] || [],
