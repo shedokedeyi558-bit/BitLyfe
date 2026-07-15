@@ -166,6 +166,8 @@ router.get('/packs', auth, async (req, res) => {
         category: pack.category,
         status: pack.status,
         is_featured: pack.is_featured || false,
+        is_vip: false,          // always false here — specials are on GET /api/pills/specials
+        pack_type: 'standard',  // always standard here
         entry_fee: pack.entry_fee !== null && pack.entry_fee !== undefined ? parseFloat(pack.entry_fee) : null,
         prize: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
         pills: pillsByPack[pack.id] || [],
