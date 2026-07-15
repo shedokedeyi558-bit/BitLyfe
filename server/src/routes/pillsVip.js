@@ -64,7 +64,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     // Fetch pack — must be VIP and active
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, entry_fee, prize, is_vip, status')
+      .select('id, name, entry_fee, prize, is_vip, status, required_correct, total_time_seconds, question_count')
       .eq('id', packId)
       .single();
 
@@ -107,16 +107,18 @@ router.post('/start', idempotency(), auth, async (req, res) => {
           session_id: existingAttempt.id,
           question: sanitizePill(currentPill, existingAttempt.current_question_index, pills.length),
           questions_remaining: pills.length - existingAttempt.current_question_index,
+          required_correct: pack.required_correct || pills.length,
+          exam_duration: pack.total_time_seconds || null,
           newBalance: player.balance,
         });
       }
 
       if (existingAttempt.status === 'won') {
-        return res.status(409).json({ success: false, code: 'ALREADY_WON', error: 'You have already completed and won this VIP pack' });
+        return res.status(409).json({ success: false, code: 'ALREADY_ATTEMPTED', error: 'You have already completed this Special' });
       }
 
       if (existingAttempt.status === 'failed') {
-        return res.status(409).json({ success: false, code: 'ALREADY_FAILED', error: 'Your attempt on this VIP pack has ended. A new attempt is not available.' });
+        return res.status(409).json({ success: false, code: 'ALREADY_ATTEMPTED', error: 'You have already attempted this Special. One attempt per account.' });
       }
     }
 
@@ -180,6 +182,8 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       session_id: attempt.id,
       question: sanitizePill(pills[0], 0, pills.length),
       questions_remaining: pills.length,
+      required_correct: pack.required_correct || pills.length,
+      exam_duration: pack.total_time_seconds || null,
       newBalance: billing ? billing.newBalance : player.balance,
       newBonusBalance: billing ? billing.newBonusBalance : (player.bonus_balance || 0),
       bonusUsed: billing ? billing.bonusUsed : 0,
@@ -280,6 +284,9 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       return res.json({
         success: true,
         result: 'failed',
+        streak_complete: true,
+        passed: false,
+        score: idx,    // number correct before failing (questions answered correctly up to this point)
         failed_on_question: idx + 1,
         total_questions: pills.length,
         correct_answer: currentPill.correct_answer,
@@ -330,6 +337,9 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
         return res.json({
           success: true,
           result: 'won',
+          streak_complete: true,
+          passed: true,
+          score: pills.length,    // all correct — won means perfect in this mode
           prize,
           newBalance,
           total_questions: pills.length,
@@ -340,6 +350,9 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       return res.json({
         success: true,
         result: 'won',
+        streak_complete: true,
+        passed: true,
+        score: pills.length,
         prize: 0,
         total_questions: pills.length,
         message: `You answered all ${pills.length} questions correctly!`,
@@ -359,6 +372,7 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
     return res.json({
       success: true,
       result: 'correct',
+      streak_complete: false,
       next_question: sanitizePill(nextPill, nextIdx, pills.length),
       questions_remaining: pills.length - nextIdx,
     });
