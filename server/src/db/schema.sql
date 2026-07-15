@@ -245,14 +245,24 @@ CREATE TABLE IF NOT EXISTS pill_packs (
   status TEXT CHECK (status IN ('active', 'inactive', 'draft')) DEFAULT 'draft',
   entry_fee DECIMAL(10,2),   -- pack-level fee: all pills in this pack share this price
   prize DECIMAL(10,2),       -- pack-level prize: all pills in this pack share this reward
-  is_vip BOOLEAN DEFAULT false,  -- VIP packs block pill ticket redemption
+  is_vip BOOLEAN DEFAULT false,  -- legacy VIP flag — superseded by pack_type
+  pack_type TEXT DEFAULT 'standard', -- 'standard' | 'special' (special = exam-style)
+  question_count INTEGER,    -- special only: how many questions to draw per attempt (5-20)
+  total_time_seconds INTEGER, -- special only: one shared timer for the whole exam
+  required_correct INTEGER,  -- special only: pass threshold (must be <= question_count)
+  entry_window_end TIMESTAMP WITH TIME ZONE, -- special only: when entries close
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Migration: add entry_fee and prize to existing pill_packs table
+-- Migration: add new columns to existing pill_packs table
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS entry_fee DECIMAL(10,2);
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS prize DECIMAL(10,2);
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS is_vip BOOLEAN DEFAULT false;
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS pack_type TEXT DEFAULT 'standard';
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS question_count INTEGER;
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS total_time_seconds INTEGER;
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS required_correct INTEGER;
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS entry_window_end TIMESTAMP WITH TIME ZONE;
 
 CREATE INDEX IF NOT EXISTS idx_pill_packs_status ON pill_packs(status);
 
@@ -539,3 +549,24 @@ CREATE TABLE IF NOT EXISTS vip_attempts (
 CREATE INDEX IF NOT EXISTS idx_vip_attempts_player_id ON vip_attempts(player_id);
 CREATE INDEX IF NOT EXISTS idx_vip_attempts_pack_id ON vip_attempts(pack_id);
 CREATE INDEX IF NOT EXISTS idx_vip_attempts_status ON vip_attempts(status);
+
+-- ─── SPECIAL ATTEMPTS TABLE ───────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS special_attempts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  player_id UUID REFERENCES players(id) ON DELETE CASCADE NOT NULL,
+  pack_id UUID REFERENCES pill_packs(id) ON DELETE CASCADE NOT NULL,
+  question_ids JSONB NOT NULL DEFAULT '[]',   -- ordered array of pill IDs drawn for this player
+  current_question_index INTEGER NOT NULL DEFAULT 0,
+  answers JSONB NOT NULL DEFAULT '[]',        -- array of submitted answers in order
+  started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  total_time_seconds INTEGER NOT NULL,        -- copied from pack at attempt creation
+  status TEXT CHECK (status IN ('in_progress', 'passed', 'failed')) DEFAULT 'in_progress',
+  correct_count INTEGER DEFAULT 0,
+  completed_at TIMESTAMP WITH TIME ZONE,
+  UNIQUE(player_id, pack_id)  -- one attempt per player per pack — DB-enforced
+);
+
+CREATE INDEX IF NOT EXISTS idx_special_attempts_player_id ON special_attempts(player_id);
+CREATE INDEX IF NOT EXISTS idx_special_attempts_pack_id ON special_attempts(pack_id);
+CREATE INDEX IF NOT EXISTS idx_special_attempts_status ON special_attempts(status);

@@ -67,15 +67,40 @@ router.get('/packs', async (req, res) => {
  */
 router.post('/packs', async (req, res) => {
   try {
-    const { name, category, status, entry_fee, prize, is_vip } = req.body;
+    const {
+      name, category, status, entry_fee, prize, is_vip,
+      pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
+    } = req.body;
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'name is required' });
     }
 
-    // VIP packs require minimum 10 questions — enforced at creation time
-    // (pills are added after creation, so we just flag the pack type here;
-    //  the activation step will enforce the 10-question minimum)
+    // Resolve effective pack type — is_vip=true is treated as 'special' for new packs
+    const effectiveType = pack_type || (is_vip ? 'special' : 'standard');
+    const isSpecial = effectiveType === 'special';
+
+    // Special pack validation
+    if (isSpecial) {
+      if (!question_count || question_count < 5 || question_count > 20) {
+        return res.status(400).json({
+          success: false,
+          error: 'Special packs require question_count between 5 and 20',
+        });
+      }
+      if (!total_time_seconds || total_time_seconds < 60) {
+        return res.status(400).json({
+          success: false,
+          error: 'Special packs require total_time_seconds (minimum 60)',
+        });
+      }
+      if (!required_correct || required_correct < 1 || required_correct > question_count) {
+        return res.status(400).json({
+          success: false,
+          error: `required_correct must be between 1 and question_count (${question_count})`,
+        });
+      }
+    }
 
     const { data, error } = await supabase
       .from('pill_packs')
@@ -86,6 +111,11 @@ router.post('/packs', async (req, res) => {
         entry_fee: entry_fee !== undefined ? Number(entry_fee) : null,
         prize: prize !== undefined ? Number(prize) : null,
         is_vip: is_vip === true || is_vip === 'true',
+        pack_type: effectiveType,
+        question_count: isSpecial ? Number(question_count) : null,
+        total_time_seconds: isSpecial ? Number(total_time_seconds) : null,
+        required_correct: isSpecial ? Number(required_correct) : null,
+        entry_window_end: isSpecial && entry_window_end ? new Date(entry_window_end).toISOString() : null,
       })
       .select()
       .single();
@@ -107,7 +137,8 @@ router.post('/packs', async (req, res) => {
 router.put('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
-    const { name, category, status, entry_fee, prize, is_vip } = req.body;
+    const { name, category, status, entry_fee, prize, is_vip,
+            pack_type, question_count, total_time_seconds, required_correct, entry_window_end } = req.body;
 
     const updates = {};
     if (name !== undefined) updates.name = name;
@@ -115,6 +146,11 @@ router.put('/packs/:packId', async (req, res) => {
     if (entry_fee !== undefined) updates.entry_fee = entry_fee === null ? null : Number(entry_fee);
     if (prize !== undefined) updates.prize = prize === null ? null : Number(prize);
     if (is_vip !== undefined) updates.is_vip = is_vip === true || is_vip === 'true';
+    if (pack_type !== undefined) updates.pack_type = pack_type;
+    if (question_count !== undefined) updates.question_count = question_count === null ? null : Number(question_count);
+    if (total_time_seconds !== undefined) updates.total_time_seconds = total_time_seconds === null ? null : Number(total_time_seconds);
+    if (required_correct !== undefined) updates.required_correct = required_correct === null ? null : Number(required_correct);
+    if (entry_window_end !== undefined) updates.entry_window_end = entry_window_end === null ? null : new Date(entry_window_end).toISOString();
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });
@@ -126,29 +162,50 @@ router.put('/packs/:packId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'No valid fields to update' });
     }
 
-    // VIP pack activation: enforce minimum 10 questions
+    // Special pack activation: enforce question_count minimum
     if (updates.status === 'active') {
       const { data: currentPack } = await supabase
         .from('pill_packs')
-        .select('is_vip')
+        .select('is_vip, pack_type, question_count')
         .eq('id', packId)
         .single();
 
-      if (currentPack?.is_vip) {
+      const isSpecial = currentPack?.pack_type === 'special' || currentPack?.is_vip;
+
+      if (isSpecial) {
+        const required = currentPack?.question_count || 10;
         const { count: pillCount } = await supabase
           .from('pills')
           .select('id', { count: 'exact', head: true })
           .eq('pack_id', packId)
           .eq('status', 'available');
 
-        if ((pillCount || 0) < 10) {
+        if ((pillCount || 0) < required) {
           return res.status(400).json({
             success: false,
-            code: 'INSUFFICIENT_VIP_QUESTIONS',
-            error: `VIP packs require at least 10 questions before activation. This pack has ${pillCount || 0}.`,
+            code: 'INSUFFICIENT_QUESTIONS',
+            error: `Special packs need at least ${required} questions before activation. This pack has ${pillCount || 0}.`,
             current_count: pillCount || 0,
-            required: 10,
+            required,
           });
+        }
+
+        // Warn (not block) if bank isn't meaningfully larger than question_count
+        const warning = (pillCount || 0) < required * 2
+          ? `Question bank (${pillCount}) is less than 2× question_count (${required}). Consider adding more for better per-player randomization.`
+          : null;
+
+        if (warning) {
+          // Store warning for response — apply update first then return with warning
+          const { data: updated, error: updateErr } = await supabase
+            .from('pill_packs')
+            .update({ ...updates })
+            .eq('id', packId)
+            .select()
+            .single();
+
+          if (updateErr || !updated) return res.status(404).json({ success: false, error: 'Pack not found or update failed' });
+          return res.json({ success: true, warning, data: { pack: updated } });
         }
       }
     }
