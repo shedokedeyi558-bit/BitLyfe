@@ -92,11 +92,15 @@ router.get('/packs', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
 
-    // Fetch active packs including pack-level fee/prize
+    // Fetch active STANDARD packs only — exclude Specials (pack_type='special' or is_vip=true)
+    // Use select with filter: pack_type = 'standard' OR (pack_type is null AND is_vip = false)
+    // Simplest safe filter: exclude anything flagged as special or vip
     const { data: packs, error: packsErr } = await supabase
       .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize')
+      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip')
       .eq('status', 'active')
+      .or('pack_type.eq.standard,pack_type.is.null')
+      .eq('is_vip', false)
       .order('created_at', { ascending: false });
 
     if (packsErr) {

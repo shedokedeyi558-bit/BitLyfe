@@ -301,13 +301,16 @@ router.post('/packs/:packId/pills', async (req, res) => {
 /**
  * DELETE /api/admin/pills/packs/:packId
  * Soft-delete a pack (status → inactive) and expire all its pills.
- * Blocked if any pills in the pack still have status = 'available'.
- * Mirrors the frontend safety check server-side — destructive actions must
- * be validated here regardless of what the client does.
+ * Blocked if any pills still have status = 'available' — unless ?force=true is passed.
+ *
+ * ?force=true: hard-deletes the pack and all its pills from the DB.
+ *   BLOCKED regardless if any real player plays exist (pill_plays.pack_id rows).
+ *   Intended for test/dev pack cleanup only.
  */
 router.delete('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
+    const force = req.query.force === 'true';
 
     // Confirm pack exists
     const { data: pack, error: packErr } = await supabase
@@ -320,7 +323,44 @@ router.delete('/packs/:packId', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pack not found' });
     }
 
-    // Safety check: reject if any pills are still available (unplayed)
+    // Always block if real player plays exist — protects transaction integrity regardless of force flag
+    const packPillIds = await supabase
+      .from('pills')
+      .select('id')
+      .eq('pack_id', packId);
+
+    const pillIds = (packPillIds.data || []).map((p) => p.id);
+
+    if (pillIds.length > 0) {
+      const { count: realPlaysCount } = await supabase
+        .from('pill_plays')
+        .select('id', { count: 'exact', head: true })
+        .in('pill_id', pillIds);
+
+      if ((realPlaysCount || 0) > 0) {
+        return res.status(409).json({
+          success: false,
+          code: 'HAS_REAL_PLAYS',
+          error: `Cannot delete pack — ${realPlaysCount} real player play${realPlaysCount === 1 ? '' : 's'} exist. This pack has live data and cannot be deleted.`,
+          real_plays_count: realPlaysCount,
+        });
+      }
+    }
+
+    // Force hard-delete — removes pills and pack entirely from DB
+    if (force) {
+      if (pillIds.length > 0) {
+        await supabase.from('pills').delete().eq('pack_id', packId);
+      }
+      await supabase.from('pill_packs').delete().eq('id', packId);
+
+      return res.json({
+        success: true,
+        data: { message: `Pack "${pack.name}" permanently deleted (${pillIds.length} pill${pillIds.length === 1 ? '' : 's'} removed)` },
+      });
+    }
+
+    // Standard soft-delete — blocked if available pills remain
     const { count: availableCount, error: countErr } = await supabase
       .from('pills')
       .select('id', { count: 'exact', head: true })
@@ -335,17 +375,19 @@ router.delete('/packs/:packId', async (req, res) => {
       return res.status(409).json({
         success: false,
         code: 'HAS_UNPLAYED_PILLS',
-        error: `Cannot delete pack — ${availableCount} unplayed pill${availableCount === 1 ? '' : 's'} remaining. Expire or remove them first.`,
+        error: `Cannot delete pack — ${availableCount} unplayed pill${availableCount === 1 ? '' : 's'} remaining. Expire them first, or use ?force=true to hard-delete (only if no real player plays exist).`,
         available_count: availableCount,
       });
     }
 
-    // Soft-delete: expire all pills in the pack, then mark pack inactive
-    await supabase
-      .from('pills')
-      .update({ status: 'expired' })
-      .eq('pack_id', packId)
-      .neq('status', 'expired'); // no-op on already-expired pills
+    // Soft-delete: expire remaining pills, mark pack inactive
+    if (pillIds.length > 0) {
+      await supabase
+        .from('pills')
+        .update({ status: 'expired' })
+        .eq('pack_id', packId)
+        .neq('status', 'expired');
+    }
 
     const { error: packUpdateErr } = await supabase
       .from('pill_packs')
