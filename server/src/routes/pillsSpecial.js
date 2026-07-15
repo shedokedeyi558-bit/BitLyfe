@@ -131,7 +131,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       return res.status(409).json({ success: false, code: 'ENTRY_CLOSED', error: 'Entry window for this special has closed' });
     }
 
-    const questionCount = pack.question_count || 10;
+    const questionCount = pack.question_count || null;  // null = use all available pills
     const totalTimeSecs = pack.total_time_seconds || 600;
     const entryFee = pack.entry_fee ? parseFloat(pack.entry_fee) : 0;
 
@@ -223,11 +223,14 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     if (bankErr) return res.status(500).json({ success: false, error: 'Failed to fetch question bank' });
 
     const bankSize = (bankPills || []).length;
-    if (bankSize < questionCount) {
+    // If question_count not set (legacy is_vip packs), use all available pills
+    const effectiveQuestionCount = questionCount || bankSize;
+
+    if (bankSize < effectiveQuestionCount) {
       return res.status(409).json({
         success: false,
         code: 'INSUFFICIENT_QUESTIONS',
-        error: `Pack has only ${bankSize} available questions, needs at least ${questionCount}.`,
+        error: `Pack has only ${bankSize} available questions, needs at least ${effectiveQuestionCount}.`,
       });
     }
 
@@ -250,10 +253,10 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       }
     }
 
-    // Randomly select question_count pills from the bank
+    // Randomly select effectiveQuestionCount pills from the bank
     const allIds = (bankPills || []).map((p) => p.id);
     shuffle(allIds);
-    const selectedIds = allIds.slice(0, questionCount);
+    const selectedIds = allIds.slice(0, effectiveQuestionCount);
 
     // Create attempt row
     const { data: attempt, error: attemptErr } = await supabase
@@ -263,7 +266,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
         pack_id: packId,
         question_ids: selectedIds,
         current_question_index: 0,
-        answers: new Array(questionCount).fill(null),
+        answers: new Array(effectiveQuestionCount).fill(null),
         total_time_seconds: totalTimeSecs,
         status: 'in_progress',
         correct_count: 0,
@@ -293,9 +296,9 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       resumed: false,
       attempt_id: attempt.id,
       question: sanitize(pills[0], 0, pills.length),
-      question_count: questionCount,
+      question_count: effectiveQuestionCount,
       total_time_seconds: totalTimeSecs,
-      required_correct: pack.required_correct || questionCount,
+      required_correct: pack.required_correct || effectiveQuestionCount,
       time_remaining_seconds: totalTimeSecs,
       newBalance: billing ? billing.newBalance : player.balance,
       newBonusBalance: billing ? billing.newBonusBalance : (player.bonus_balance || 0),
