@@ -126,6 +126,11 @@ router.get('/:id', async (req, res) => {
     const now = Date.now();
     const countdownEnd = new Date(prediction.countdown_end_time).getTime();
 
+    // Compute display_status dynamically — same logic as formatPrediction in games.js
+    const display_status = prediction.correct_answer ? 'completed'
+      : countdownEnd < now ? 'locked'
+      : 'active';
+
     return res.json({
       success: true,
       data: {
@@ -136,6 +141,7 @@ router.get('/:id', async (req, res) => {
           question: prediction.question,
           category: prediction.category,
           status: prediction.status,
+          display_status,
           entry_fee: Number(prediction.entry_fee),
           fee: Number(prediction.entry_fee),
           prize_per_winner: Number(prediction.prize_per_winner),

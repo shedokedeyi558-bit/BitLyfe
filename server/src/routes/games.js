@@ -42,18 +42,33 @@ function formatPill(pill, { includeAnswer = true } = {}) {
 }
 
 /**
- * Format a prediction for API response
+ * Format a prediction for API response.
+ * display_status is computed on read — never trust the stored status alone:
+ *   correct_answer set               → "completed"
+ *   correct_answer null + countdown passed → "locked"
+ *   otherwise                        → "active"
  */
 function formatPrediction(prediction) {
   const now = Date.now();
   const countdownEnd = new Date(prediction.countdown_end_time).getTime();
+
+  let display_status;
+  if (prediction.correct_answer) {
+    display_status = 'completed';
+  } else if (countdownEnd < now) {
+    display_status = 'locked';
+  } else {
+    display_status = 'active';
+  }
+
   return {
     id: prediction.id,
     game_type: 'predictions',
     title: prediction.question,
     question: prediction.question,
     category: prediction.category,
-    status: prediction.status,
+    status: prediction.status,         // stored DB value — kept for compatibility
+    display_status,                    // computed on read — use this for display
     entry_fee: Number(prediction.entry_fee),
     fee: Number(prediction.entry_fee),
     prize_per_winner: Number(prediction.prize_per_winner),
@@ -566,18 +581,50 @@ router.put('/:id', adminAuth, async (req, res) => {
 
 /**
  * DELETE /api/admin/games/:id
- * Delete game (only if draft status)
+ * Predictions: deletable when display_status = 'completed' (correct_answer set).
+ * Challenges: deletable when status = 'draft'.
+ * Doors: not deletable.
  */
 router.delete('/:id', adminAuth, async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Check if it's a prediction first
+    const { data: prediction } = await supabase
+      .from('predictions')
+      .select('id, question, correct_answer, countdown_end_time, status')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (prediction) {
+      // Compute display_status dynamically
+      const now = Date.now();
+      const countdownEnd = new Date(prediction.countdown_end_time).getTime();
+      const display_status = prediction.correct_answer ? 'completed'
+        : countdownEnd < now ? 'locked'
+        : 'active';
+
+      if (display_status !== 'completed') {
+        return res.status(400).json({
+          success: false,
+          error: `Can only delete completed predictions (display_status is "${display_status}"). Reveal the answer first.`,
+          display_status,
+        });
+      }
+
+      // Delete participations first (FK constraint), then prediction
+      await supabase.from('prediction_participations').delete().eq('prediction_id', id);
+      await supabase.from('predictions').delete().eq('id', id);
+
+      return res.json({ success: true, data: { message: `Prediction "${prediction.question.substring(0, 50)}" deleted` } });
+    }
 
     // Check if it's a challenge
     const { data: challenge } = await supabase
       .from('challenges')
       .select('status')
       .eq('id', id)
-      .single();
+      .maybeSingle();
 
     if (challenge) {
       if (challenge.status !== 'draft') {
