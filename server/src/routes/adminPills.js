@@ -130,6 +130,72 @@ router.post('/packs', async (req, res) => {
 });
 
 /**
+ * PUT /api/admin/pills/packs/:packId/feature
+ * Set this pack as the featured pack (is_featured = true).
+ * Simultaneously clears is_featured on all other standard packs.
+ * Only allowed on standard packs — not Specials.
+ */
+router.put('/packs/:packId/feature', async (req, res) => {
+  try {
+    const { packId } = req.params;
+
+    const { data: pack, error: packErr } = await supabase
+      .from('pill_packs')
+      .select('id, name, pack_type, is_vip, status')
+      .eq('id', packId)
+      .single();
+
+    if (packErr || !pack) {
+      return res.status(404).json({ success: false, error: 'Pack not found' });
+    }
+
+    // Block on Specials
+    const isSpecial = pack.pack_type === 'special' || pack.is_vip;
+    if (isSpecial) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot feature a Special pack — featured selection is for standard packs only',
+      });
+    }
+
+    if (pack.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        error: 'Only active packs can be featured',
+      });
+    }
+
+    // Clear is_featured on all other standard packs first
+    await supabase
+      .from('pill_packs')
+      .update({ is_featured: false })
+      .or('pack_type.eq.standard,pack_type.is.null')
+      .eq('is_vip', false)
+      .neq('id', packId);
+
+    // Set this pack as featured
+    const { data: updated, error: updateErr } = await supabase
+      .from('pill_packs')
+      .update({ is_featured: true })
+      .eq('id', packId)
+      .select()
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ success: false, error: 'Failed to set featured pack' });
+    }
+
+    return res.json({
+      success: true,
+      data: { pack: updated, message: `"${pack.name}" is now the featured pack` },
+    });
+  } catch (err) {
+    console.error('Feature pack error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to feature pack' });
+  }
+});
+
+/**
  * PUT /api/admin/pills/packs/:packId
  * Update a pack's name, category, status, entry_fee, or prize
  * Body: { name?, category?, status?, entry_fee?, prize? }

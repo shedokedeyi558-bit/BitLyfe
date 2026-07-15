@@ -251,6 +251,7 @@ CREATE TABLE IF NOT EXISTS pill_packs (
   total_time_seconds INTEGER, -- special only: one shared timer for the whole exam
   required_correct INTEGER,  -- special only: pass threshold (must be <= question_count)
   entry_window_end TIMESTAMP WITH TIME ZONE, -- special only: when entries close
+  is_featured BOOLEAN DEFAULT false, -- only one standard pack featured at a time
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -263,6 +264,7 @@ ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS question_count INTEGER;
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS total_time_seconds INTEGER;
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS required_correct INTEGER;
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS entry_window_end TIMESTAMP WITH TIME ZONE;
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS is_featured BOOLEAN DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS idx_pill_packs_status ON pill_packs(status);
 
