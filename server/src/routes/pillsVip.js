@@ -239,12 +239,15 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       });
     }
 
-    // Fetch available pills from the shared `pills` table, filtered by pack_id only
+    // Fetch available pills from the shared `pills` table, filtered by pack_id only.
+    // Exclude soft-deleted pills (deleted_at IS NOT NULL) — they stay in the DB
+    // for historical attempt auditing but must not appear in new attempt draws.
     const { data: bankPills, error: bankErr } = await supabase
       .from('pills')
       .select('id')
       .eq('pack_id', packId)
-      .eq('status', 'available');
+      .eq('status', 'available')
+      .is('deleted_at', null);
 
     if (bankErr) {
       console.error('VIP start — pills query error:', bankErr);

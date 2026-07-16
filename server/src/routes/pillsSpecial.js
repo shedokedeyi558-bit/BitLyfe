@@ -229,7 +229,8 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       .from('pills')
       .select('id')
       .eq('pack_id', packId)
-      .eq('status', 'available');
+      .eq('status', 'available')
+      .is('deleted_at', null);   // exclude soft-deleted pills from bank draws
 
     if (bankErr) return res.status(500).json({ success: false, error: 'Failed to fetch question bank' });
 
