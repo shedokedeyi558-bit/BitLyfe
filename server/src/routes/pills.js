@@ -552,6 +552,14 @@ router.post('/submit', auth, async (req, res) => {
     // Check answer
     const correct = checkAnswer(pill, String(answer));
 
+    // Increment per-question stats atomically (fire-and-forget — never blocks response).
+    // Only called after lock is acquired, so retries that were already rejected
+    // (lockCount === 0) never reach this line — no double-counting.
+    supabase.rpc('increment_pill_stats', {
+      p_pill_id:    pillId,
+      p_is_correct: correct,
+    }).catch((err) => console.error('increment_pill_stats error:', err));
+
     // Resolve prize: use pack-level if pill belongs to a pack with one set
     let prize = parseFloat(pill.prize);
     if (pill.pack_id) {

@@ -417,6 +417,19 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
 
     const currentAnswers = freshAttempt?.answers || new Array(questionIds.length).fill(null);
 
+    // Grade this individual answer for per-question stats (fire-and-forget).
+    // We do this even though special packs don't reveal correct/incorrect mid-exam —
+    // the stat is for admin analytics only. Only reached after lock acquired,
+    // so retries never get here — no double-counting.
+    const [currentPillForStats] = await getPillsByIds([questionIds[idx]]);
+    if (currentPillForStats) {
+      const isAnswerCorrect = checkAnswer(currentPillForStats, String(answer));
+      supabase.rpc('increment_pill_stats', {
+        p_pill_id:    questionIds[idx],
+        p_is_correct: isAnswerCorrect,
+      }).catch((err) => console.error('increment_pill_stats error:', err));
+    }
+
     const nextIdx = idx + 1;
     const isLastQuestion = nextIdx >= questionIds.length;
 

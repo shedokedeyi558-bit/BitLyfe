@@ -622,12 +622,18 @@ router.get('/stats', async (req, res) => {
  * GET /api/admin/pills/packs/:packId/pills
  * List all non-deleted pills for a specific pack (paginated, admin view).
  * Includes available, played, and expired — excludes soft-deleted.
- * Query: ?page=1&limit=20&status=available
+ * Exposes times_answered, times_correct, correct_rate for question difficulty analysis.
+ *
+ * Query:
+ *   ?page=1&limit=20
+ *   ?status=available
+ *   ?sort_by=correct_rate|times_answered|created_at  (default: created_at)
+ *   ?sort_order=asc|desc  (default: asc for created_at, desc for stats columns)
  */
 router.get('/packs/:packId/pills', async (req, res) => {
   try {
     const { packId } = req.params;
-    const { page = 1, limit = 20, status } = req.query;
+    const { page = 1, limit = 20, status, sort_by, sort_order } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
     // Confirm pack exists
@@ -641,12 +647,23 @@ router.get('/packs/:packId/pills', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pack not found' });
     }
 
+    // Determine sort column and direction
+    const SORTABLE = ['correct_rate', 'times_answered', 'times_correct', 'created_at'];
+    const sortCol = SORTABLE.includes(sort_by) ? sort_by : 'created_at';
+    // correct_rate is computed, not a real column — sort by times_correct/times_answered ratio
+    // We handle it post-fetch for correct_rate since Supabase JS can't sort on computed values.
+    const needsComputedSort = sortCol === 'correct_rate';
+    const dbSortCol = needsComputedSort ? 'created_at' : sortCol;
+    // Default: asc for created_at, desc for stats columns (surface extremes first)
+    const defaultOrder = sortCol === 'created_at' ? true : false;
+    const ascending = sort_order ? sort_order === 'asc' : defaultOrder;
+
     let query = supabase
       .from('pills')
-      .select('id, pack_id, question, format, options, correct_answer, timer_seconds, color, case_sensitive, entry_fee, prize, status, deleted_at, created_at, updated_at', { count: 'exact' })
+      .select('id, pack_id, question, format, options, correct_answer, timer_seconds, color, case_sensitive, entry_fee, prize, status, deleted_at, times_answered, times_correct, created_at, updated_at', { count: 'exact' })
       .eq('pack_id', packId)
-      .is('deleted_at', null)           // exclude soft-deleted
-      .order('created_at', { ascending: true })
+      .is('deleted_at', null)
+      .order(dbSortCol, { ascending })
       .range(offset, offset + Number(limit) - 1);
 
     if (status) query = query.eq('status', status);
@@ -657,10 +674,27 @@ router.get('/packs/:packId/pills', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
     }
 
+    // Compute correct_rate per pill and optionally sort by it
+    let result = (pills || []).map((p) => ({
+      ...p,
+      correct_rate: p.times_answered > 0
+        ? parseFloat((p.times_correct / p.times_answered).toFixed(4))
+        : null,
+    }));
+
+    if (needsComputedSort) {
+      result.sort((a, b) => {
+        // nulls (never answered) always sort last
+        const ra = a.correct_rate ?? (ascending ? Infinity : -Infinity);
+        const rb = b.correct_rate ?? (ascending ? Infinity : -Infinity);
+        return ascending ? ra - rb : rb - ra;
+      });
+    }
+
     // Bank entropy summary
     const isSpecial = pack.pack_type === 'special' || pack.is_vip;
     const qc = pack.question_count;
-    const availableCount = (pills || []).filter((p) => p.status === 'available').length;
+    const availableCount = result.filter((p) => p.status === 'available').length;
     let bankRatio = null;
     let lowEntropyWarning = null;
     if (isSpecial && qc) {
@@ -675,7 +709,7 @@ router.get('/packs/:packId/pills', async (req, res) => {
     return res.json({
       success: true,
       data: {
-        pills: pills || [],
+        pills: result,
         total: count || 0,
         page: Number(page),
         limit: Number(limit),
@@ -692,18 +726,30 @@ router.get('/packs/:packId/pills', async (req, res) => {
 
 /**
  * GET /api/admin/pills
- * List all non-deleted pills (paginated, cross-pack)
+ * List all non-deleted pills (paginated, cross-pack).
+ * Exposes times_answered, times_correct, correct_rate.
+ * Query:
+ *   ?status=available&category=X&pack_id=X
+ *   ?sort_by=correct_rate|times_answered|times_correct|created_at
+ *   ?sort_order=asc|desc
  */
 router.get('/', async (req, res) => {
   try {
-    const { status, category, pack_id, page = 1, limit = 20 } = req.query;
+    const { status, category, pack_id, page = 1, limit = 20, sort_by, sort_order } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
+
+    const SORTABLE = ['correct_rate', 'times_answered', 'times_correct', 'created_at'];
+    const sortCol = SORTABLE.includes(sort_by) ? sort_by : 'created_at';
+    const needsComputedSort = sortCol === 'correct_rate';
+    const dbSortCol = needsComputedSort ? 'created_at' : sortCol;
+    const defaultAsc = sortCol === 'created_at';
+    const ascending = sort_order ? sort_order === 'asc' : defaultAsc;
 
     let query = supabase
       .from('pills')
-      .select('*', { count: 'exact' })
-      .is('deleted_at', null)           // exclude soft-deleted
-      .order('created_at', { ascending: false })
+      .select('*, times_answered, times_correct', { count: 'exact' })
+      .is('deleted_at', null)
+      .order(dbSortCol, { ascending })
       .range(offset, offset + Number(limit) - 1);
 
     if (status) query = query.eq('status', status);
@@ -714,7 +760,22 @@ router.get('/', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
 
-    return res.json({ success: true, data: { pills: data, total: count, page: Number(page), limit: Number(limit) } });
+    let result = (data || []).map((p) => ({
+      ...p,
+      correct_rate: p.times_answered > 0
+        ? parseFloat((p.times_correct / p.times_answered).toFixed(4))
+        : null,
+    }));
+
+    if (needsComputedSort) {
+      result.sort((a, b) => {
+        const ra = a.correct_rate ?? (ascending ? Infinity : -Infinity);
+        const rb = b.correct_rate ?? (ascending ? Infinity : -Infinity);
+        return ascending ? ra - rb : rb - ra;
+      });
+    }
+
+    return res.json({ success: true, data: { pills: result, total: count, page: Number(page), limit: Number(limit) } });
   } catch (err) {
     console.error('Get pills error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
