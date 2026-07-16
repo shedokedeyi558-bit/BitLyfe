@@ -385,7 +385,9 @@ router.post('/open', idempotency(), auth, async (req, res) => {
 
 /**
  * POST /api/pills/submit
- * Submit answer to a pill
+ * Submit answer to a pill.
+ * Atomically locks the pill_plays row on first submission — any duplicate
+ * request (double-click, retry) hits the lock and gets a 409.
  * Body: { pillId, answer }
  */
 router.post('/submit', auth, async (req, res) => {
@@ -411,7 +413,7 @@ router.post('/submit', auth, async (req, res) => {
     // Verify this player opened this pill
     const { data: play } = await supabase
       .from('pill_plays')
-      .select('id, won')
+      .select('id, won, locked_at')
       .eq('pill_id', pillId)
       .eq('player_id', player.id)
       .single();
@@ -419,6 +421,35 @@ router.post('/submit', auth, async (req, res) => {
     if (!play) {
       return res.status(409).json({ success: false, error: 'You must open this pill first' });
     }
+
+    // ── Atomic lock: only the first submit wins ────────────────────────────
+    // lock_pill_answer() does UPDATE ... WHERE locked_at IS NULL
+    // and returns the row count. 0 means already locked → reject.
+    const now = new Date().toISOString();
+    const { data: lockCount, error: lockErr } = await supabase
+      .rpc('lock_pill_answer', {
+        p_pill_id:   pillId,
+        p_player_id: player.id,
+        p_answer:    String(answer),
+        p_now:       now,
+      });
+
+    if (lockErr) {
+      console.error('lock_pill_answer RPC error:', lockErr);
+      return res.status(500).json({ success: false, error: 'Failed to lock answer' });
+    }
+
+    if (lockCount === 0) {
+      // Another request already locked this slot — return 409 with locked state
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_ANSWERED',
+        error: 'This question has already been answered',
+        locked: true,
+        locked_at: play.locked_at,
+      });
+    }
+    // ── Lock acquired — proceed with grading ──────────────────────────────
 
     // Check answer
     const correct = checkAnswer(pill, String(answer));
@@ -496,6 +527,8 @@ router.post('/submit', auth, async (req, res) => {
           correctAnswer: pill.correct_answer,
           prize: prize,
           newBalance: newBalance,
+          locked: true,
+          locked_at: now,
         },
       });
     }
@@ -528,6 +561,8 @@ router.post('/submit', auth, async (req, res) => {
         won: false,
         correctAnswer: pill.correct_answer,
         prize: 0,
+        locked: true,
+        locked_at: now,
       },
     });
   } catch (err) {

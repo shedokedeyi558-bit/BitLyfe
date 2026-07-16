@@ -341,7 +341,7 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
 
     const { data: attempt, error: attemptErr } = await supabase
       .from('special_attempts')
-      .select('id, player_id, pack_id, question_ids, current_question_index, answers, started_at, total_time_seconds, status')
+      .select('id, player_id, pack_id, question_ids, current_question_index, answers, answer_locked_at, started_at, total_time_seconds, status')
       .eq('id', attemptId)
       .single();
 
@@ -363,13 +363,48 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
     }
 
     const questionIds = attempt.question_ids || [];
-    const currentAnswers = attempt.answers || new Array(questionIds.length).fill(null);
     const idx = attempt.current_question_index;
     const secsLeft = secondsRemaining(attempt.started_at, attempt.total_time_seconds);
     const timedOut = secsLeft <= 0;
 
-    // Record this answer (even if timed out — it was submitted)
-    currentAnswers[idx] = String(answer);
+    // ── Atomic per-question lock ──────────────────────────────────────────────
+    const now = new Date().toISOString();
+    const { data: lockCount, error: lockErr } = await supabase
+      .rpc('lock_special_answer', {
+        p_attempt_id: attemptId,
+        p_player_id:  player.id,
+        p_idx:        idx,
+        p_answer:     String(answer),
+        p_now:        now,
+      });
+
+    if (lockErr) {
+      console.error('lock_special_answer RPC error:', lockErr);
+      return res.status(500).json({ success: false, error: 'Failed to lock answer' });
+    }
+
+    if (lockCount === 0) {
+      const existingLocks = attempt.answer_locked_at || [];
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_ANSWERED',
+        error: 'This question has already been answered',
+        locked: true,
+        locked_at: existingLocks[idx] || null,
+        question_number: idx + 1,
+      });
+    }
+    // ── Lock acquired ─────────────────────────────────────────────────────────
+
+    // Re-fetch answers array as written by the RPC
+    const { data: freshAttempt } = await supabase
+      .from('special_attempts')
+      .select('answers')
+      .eq('id', attemptId)
+      .single();
+
+    const currentAnswers = freshAttempt?.answers || new Array(questionIds.length).fill(null);
+
     const nextIdx = idx + 1;
     const isLastQuestion = nextIdx >= questionIds.length;
 
@@ -391,7 +426,6 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
       await supabase
         .from('special_attempts')
         .update({
-          answers: currentAnswers,
           current_question_index: nextIdx,
           status: finalStatus,
           correct_count,
@@ -419,6 +453,8 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
       return res.json({
         success: true,
         result: finalStatus,
+        locked: true,
+        locked_at: now,
         timed_out: timedOut && !isLastQuestion,
         correct_count,
         required_correct: requiredCorrect,
@@ -431,10 +467,10 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
       });
     }
 
-    // More questions remain — advance and return next question
+    // More questions remain — advance current_question_index and return next question
     await supabase
       .from('special_attempts')
-      .update({ answers: currentAnswers, current_question_index: nextIdx })
+      .update({ current_question_index: nextIdx })
       .eq('id', attemptId);
 
     const pills = await getPillsByIds(questionIds);
@@ -443,6 +479,8 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
     return res.json({
       success: true,
       result: 'next',
+      locked: true,
+      locked_at: now,
       next_question: sanitize(nextPill, nextIdx, questionIds.length),
       questions_remaining: questionIds.length - nextIdx,
       time_remaining_seconds: Math.max(0, secsLeft),

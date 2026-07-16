@@ -364,23 +364,19 @@ router.post('/start', idempotency(), auth, async (req, res) => {
  * POST /api/pills/vip/answer/:sessionId
  * Submit answer for the current question in a VIP/Special attempt.
  *
- * Non-final question:
- * {
- *   success: true,
- *   data: {
- *     correct, correct_answer, next_question, next_question_index,
- *     streak_complete: false, entry_fee, question_number
- *   }
- * }
+ * Each question locks independently via lock_special_answer() — an atomic
+ * DB-level conditional UPDATE that only fires when the slot is currently null.
+ * A duplicate submission (double-click, retry) returns 409 ALREADY_ANSWERED.
  *
- * Final question (all answered):
- * {
- *   success: true,
- *   data: {
- *     correct, correct_answer, streak_complete: true,
- *     passed, score, prize, new_balance, entry_fee, question_number
- *   }
- * }
+ * Non-final question response:
+ * { success: true, data: { correct, correct_answer, locked_at,
+ *     next_question, next_question_index, streak_complete: false,
+ *     entry_fee, question_number } }
+ *
+ * Final question response:
+ * { success: true, data: { correct, correct_answer, locked_at,
+ *     streak_complete: true, passed, score, prize, new_balance,
+ *     entry_fee, question_number } }
  *
  * Body: { answer }
  */
@@ -394,10 +390,10 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'answer is required (send empty string to skip)' });
     }
 
-    // Fetch attempt from special_attempts
+    // Fetch attempt from special_attempts — include answer_locked_at for lock state
     const { data: attempt, error: attemptErr } = await supabase
       .from('special_attempts')
-      .select('id, player_id, pack_id, question_ids, current_question_index, answers, started_at, total_time_seconds, status')
+      .select('id, player_id, pack_id, question_ids, current_question_index, answers, answer_locked_at, started_at, total_time_seconds, status')
       .eq('id', sessionId)
       .single();
 
@@ -418,7 +414,6 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
     }
 
     const questionIds = attempt.question_ids || [];
-    const currentAnswers = attempt.answers || new Array(questionIds.length).fill(null);
     const idx = attempt.current_question_index;
     const secsLeft = secondsRemaining(attempt.started_at, attempt.total_time_seconds);
     const timedOut = secsLeft <= 0;
@@ -427,14 +422,59 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'All questions already answered' });
     }
 
-    // Fetch the current pill to validate the answer and get correct_answer for response
+    // ── Atomic per-question lock ──────────────────────────────────────────────
+    // lock_special_answer() does:
+    //   UPDATE special_attempts
+    //   SET answers[idx] = answer, answer_locked_at[idx] = now
+    //   WHERE id = sessionId AND status = 'in_progress'
+    //     AND answer_locked_at[idx] IS NULL   ← the gate
+    // Returns 1 if lock acquired, 0 if already locked.
+    const now = new Date().toISOString();
+    const { data: lockCount, error: lockErr } = await supabase
+      .rpc('lock_special_answer', {
+        p_attempt_id: sessionId,
+        p_player_id:  player.id,
+        p_idx:        idx,
+        p_answer:     String(answer),
+        p_now:        now,
+      });
+
+    if (lockErr) {
+      console.error('lock_special_answer RPC error:', lockErr);
+      return res.status(500).json({ success: false, error: 'Failed to lock answer' });
+    }
+
+    if (lockCount === 0) {
+      // Slot already locked — return the existing locked_at timestamp
+      const existingLocks = attempt.answer_locked_at || [];
+      const existingLockedAt = existingLocks[idx] || null;
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_ANSWERED',
+        error: 'This question has already been answered',
+        locked: true,
+        locked_at: existingLockedAt,
+        question_number: idx + 1,
+      });
+    }
+    // ── Lock acquired — read back the current answers array ──────────────────
+
+    // Re-fetch attempt to get the answers array as updated by the RPC
+    const { data: freshAttempt } = await supabase
+      .from('special_attempts')
+      .select('answers')
+      .eq('id', sessionId)
+      .single();
+
+    const currentAnswers = freshAttempt?.answers || new Array(questionIds.length).fill(null);
+
+    // Fetch the current pill for grading + correct_answer reveal
     const [currentPill] = await getPillsByIds([questionIds[idx]]);
     if (!currentPill) {
       return res.status(500).json({ success: false, error: 'Could not load current question' });
     }
 
     const isCorrect = checkAnswer(currentPill, String(answer));
-    currentAnswers[idx] = String(answer);
     const nextIdx = idx + 1;
     const isLastQuestion = nextIdx >= questionIds.length;
 
@@ -457,7 +497,6 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       await supabase
         .from('special_attempts')
         .update({
-          answers: currentAnswers,
           current_question_index: nextIdx,
           status: finalStatus,
           correct_count,
@@ -492,6 +531,8 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
         data: {
           correct: isCorrect,
           correct_answer: currentPill.correct_answer,
+          locked: true,
+          locked_at: now,
           streak_complete: true,
           passed,
           score: correct_count,
@@ -506,10 +547,10 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       });
     }
 
-    // More questions remain — advance
+    // More questions remain — advance current_question_index
     await supabase
       .from('special_attempts')
-      .update({ answers: currentAnswers, current_question_index: nextIdx })
+      .update({ current_question_index: nextIdx })
       .eq('id', sessionId);
 
     const pills = await getPillsByIds(questionIds);
@@ -520,6 +561,8 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       data: {
         correct: isCorrect,
         correct_answer: currentPill.correct_answer,
+        locked: true,
+        locked_at: now,
         next_question: sanitize(nextPill, nextIdx, questionIds.length),
         next_question_index: nextIdx,
         streak_complete: false,
