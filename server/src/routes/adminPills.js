@@ -75,6 +75,13 @@ router.get('/packs', async (req, res) => {
         bank_ratio: bankRatio,
         low_entropy_warning: lowEntropyWarning,
         recommended_bank_size: recommendedBankSize,
+        // ── Quiz expiry fields ─────────────────────────────────────────────
+        // quiz_expires_at: admin-set expiry for this Pills/Specials pack.
+        // Independent of entry_window_end (Time Machine only).
+        quiz_expires_at: pack.quiz_expires_at || null,
+        // quiz_expired: true once the expiry time has passed.
+        // Admin panel should show the pack as "Ended" when this is true.
+        quiz_expired: pack.quiz_expires_at ? new Date(pack.quiz_expires_at) < new Date() : false,
       };
     });
 
@@ -88,14 +95,20 @@ router.get('/packs', async (req, res) => {
 /**
  * POST /api/admin/pills/packs
  * Create a new pill pack
- * Body: { name, category, status?, entry_fee?, prize? }
+ * Body: { name, category, status?, entry_fee?, prize?, quiz_expires_at? }
  * entry_fee and prize are pack-level — all pills in this pack share these values.
+ *
+ * quiz_expires_at: optional ISO timestamp (or duration expressed as hours, e.g.
+ *   pass "24h" to get now + 24 hours, or a full ISO string for a specific time).
+ *   Once this time passes, no new player entries are accepted server-side.
+ *   Independent of entry_window_end — do NOT confuse the two.
  */
 router.post('/packs', async (req, res) => {
   try {
     const {
       name, category, status, entry_fee, prize, is_vip,
       pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
+      quiz_expires_at,
     } = req.body;
 
     if (!name) {
@@ -142,6 +155,8 @@ router.post('/packs', async (req, res) => {
         total_time_seconds: isSpecial ? Number(total_time_seconds) : null,
         required_correct: isSpecial ? Number(required_correct) : null,
         entry_window_end: isSpecial && entry_window_end ? new Date(entry_window_end).toISOString() : null,
+        // quiz_expires_at: Pills/Specials-only expiry — independent of entry_window_end
+        quiz_expires_at: quiz_expires_at ? new Date(quiz_expires_at).toISOString() : null,
       })
       .select()
       .single();
@@ -233,14 +248,18 @@ router.put('/packs/:packId/feature', async (req, res) => {
 
 /**
  * PUT /api/admin/pills/packs/:packId
- * Update a pack's name, category, status, entry_fee, or prize
- * Body: { name?, category?, status?, entry_fee?, prize? }
+ * Update a pack's name, category, status, entry_fee, prize, or quiz_expires_at.
+ * Body: { name?, category?, status?, entry_fee?, prize?, quiz_expires_at? }
+ *
+ * quiz_expires_at: set to null to clear, or an ISO timestamp to set/update.
+ *   This is the Pills/Specials-only expiry — completely independent of entry_window_end.
  */
 router.put('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
     const { name, category, status, entry_fee, prize, is_vip,
-            pack_type, question_count, total_time_seconds, required_correct, entry_window_end } = req.body;
+            pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
+            quiz_expires_at } = req.body;
 
     const updates = {};
     if (name !== undefined) updates.name = name;
@@ -253,6 +272,8 @@ router.put('/packs/:packId', async (req, res) => {
     if (total_time_seconds !== undefined) updates.total_time_seconds = total_time_seconds === null ? null : Number(total_time_seconds);
     if (required_correct !== undefined) updates.required_correct = required_correct === null ? null : Number(required_correct);
     if (entry_window_end !== undefined) updates.entry_window_end = entry_window_end === null ? null : new Date(entry_window_end).toISOString();
+    // quiz_expires_at: Pills/Specials expiry — independent of entry_window_end
+    if (quiz_expires_at !== undefined) updates.quiz_expires_at = quiz_expires_at === null ? null : new Date(quiz_expires_at).toISOString();
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });

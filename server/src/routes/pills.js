@@ -105,7 +105,7 @@ router.get('/packs', auth, async (req, res) => {
     // the correct challenge phrase without a separate request.
     const { data: packs, error: packsErr } = await supabase
       .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, is_featured, question_count, total_time_seconds, required_correct, entry_window_end')
+      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, is_featured, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at')
       .eq('status', 'active')
       .order('is_featured', { ascending: false })  // featured pack sorts first
       .order('created_at', { ascending: false });
@@ -164,13 +164,15 @@ router.get('/packs', auth, async (req, res) => {
       });
     }
 
-    // Only return packs where at least one pill hasn't been played by this player
+    // Only return packs where at least one pill hasn't been played by this player,
+    // and quiz_expires_at hasn't passed (expired packs are hidden from players).
+    const now = new Date();
     const result = packs
+      .filter((pack) => !pack.quiz_expires_at || new Date(pack.quiz_expires_at) > now)
       .map((pack) => {
         const packPills = pillsByPack[pack.id] || [];
         const isSpecial = pack.pack_type === 'special' || pack.is_vip;
 
-        // Derive time_limit_minutes from total_time_seconds (round up to nearest minute)
         const timeLimitMinutes = pack.total_time_seconds
           ? Math.ceil(pack.total_time_seconds / 60)
           : null;
@@ -184,27 +186,23 @@ router.get('/packs', auth, async (req, res) => {
           is_vip: pack.is_vip || false,
           pack_type: pack.pack_type || 'standard',
 
-          // ── Payment / prize fields (pre-payment challenge phrase) ──────────
+          // ── Payment / prize fields ─────────────────────────────────────────
           entry_fee: pack.entry_fee !== null && pack.entry_fee !== undefined ? parseFloat(pack.entry_fee) : null,
           prize_amount: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
-          // keep 'prize' as an alias so nothing that already reads it breaks
           prize: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
 
           // ── Exam / challenge-phrase fields ────────────────────────────────
-          // question_count: how many questions will be drawn per attempt
           question_count: isSpecial ? (pack.question_count || null) : null,
-          // total_time_seconds: raw value for anything that needs it
           total_time_seconds: isSpecial ? (pack.total_time_seconds || null) : null,
-          // time_limit_minutes: human-readable for the challenge phrase
           time_limit_minutes: isSpecial ? timeLimitMinutes : null,
-          // pass_threshold: minimum correct answers to pass (Specials only)
           pass_threshold: isSpecial ? (pack.required_correct || null) : null,
-          // required_correct: alias — same value, some code may use either name
           required_correct: isSpecial ? (pack.required_correct || null) : null,
-          // entry_window_end: when entries close (Specials only)
+          // entry_window_end: Time Machine / predictions field — exposed for completeness
           entry_window_end: isSpecial ? (pack.entry_window_end || null) : null,
-          // available_question_count: live bank size for "X questions" in challenge phrase
           available_question_count: packPills.filter((p) => p.status === 'available').length,
+
+          // ── Quiz expiry (Pills/Specials only — independent of entry_window_end) ──
+          quiz_expires_at: pack.quiz_expires_at || null,
 
           pills: packPills,
         };
@@ -234,7 +232,7 @@ router.get('/specials', auth, async (req, res) => {
   try {
     const { data: packs, error } = await supabase
       .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end')
+      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at')
       .eq('status', 'active')
       .or('pack_type.eq.special,is_vip.eq.true')
       .order('created_at', { ascending: false });
@@ -244,9 +242,14 @@ router.get('/specials', auth, async (req, res) => {
     }
 
     const now = new Date();
-    const activePacks = (packs || []).filter(
-      (p) => !p.entry_window_end || new Date(p.entry_window_end) > now
-    );
+    const activePacks = (packs || []).filter((p) => {
+      // Filter out packs whose entry_window_end has passed (legacy Time Machine check)
+      if (p.entry_window_end && new Date(p.entry_window_end) <= now) return false;
+      // Filter out packs whose quiz_expires_at has passed (Pills/Specials expiry)
+      // Independent of entry_window_end — different field, different purpose.
+      if (p.quiz_expires_at && new Date(p.quiz_expires_at) <= now) return false;
+      return true;
+    });
 
     // Fetch live available pill counts for all these packs in one query
     const packIds = activePacks.map((p) => p.id);
@@ -290,10 +293,12 @@ router.get('/specials', auth, async (req, res) => {
         // pass_threshold / required_correct: minimum correct answers to pass
         pass_threshold: p.required_correct || null,
         required_correct: p.required_correct || null,  // alias
-        // entry_window_end: when entries close
+        // entry_window_end: Time Machine / predictions field — not the expiry for this pack
         entry_window_end: p.entry_window_end || null,
         // available_question_count: live bank — how many questions the admin has added
         available_question_count: availableCountByPack[p.id] || 0,
+        // quiz_expires_at: Pills/Specials-only expiry — independent of entry_window_end
+        quiz_expires_at: p.quiz_expires_at || null,
       };
     });
 
@@ -390,9 +395,20 @@ router.post('/open', idempotency(), auth, async (req, res) => {
     if (pill.pack_id) {
       const { data: pack } = await supabase
         .from('pill_packs')
-        .select('entry_fee, prize')
+        .select('entry_fee, prize, quiz_expires_at')
         .eq('id', pill.pack_id)
         .single();
+
+      // Block new opens if the pack's quiz_expires_at has passed.
+      // Independent of entry_window_end — that field is for Time Machine/predictions only.
+      if (pack?.quiz_expires_at && new Date(pack.quiz_expires_at) < new Date()) {
+        return res.status(410).json({
+          success: false,
+          code: 'QUIZ_EXPIRED',
+          error: 'This pack is no longer accepting new entries — it has ended.',
+        });
+      }
+
       if (pack?.entry_fee !== null && pack?.entry_fee !== undefined) {
         entryFee = parseFloat(pack.entry_fee);
       }

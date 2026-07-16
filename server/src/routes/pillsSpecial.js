@@ -109,7 +109,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     // Fetch pack — must be special type and active
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end')
+      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at')
       .eq('id', packId)
       .single();
 
@@ -214,6 +214,17 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     }
 
     // New attempt — validate question bank
+    // Block new entries if quiz_expires_at has passed.
+    // Already in-progress attempts (resumed above) are unaffected — only new entries are blocked.
+    // This is independent of entry_window_end (Time Machine / predictions field — do not touch).
+    if (pack.quiz_expires_at && new Date(pack.quiz_expires_at) < new Date()) {
+      return res.status(410).json({
+        success: false,
+        code: 'QUIZ_EXPIRED',
+        error: 'This pack is no longer accepting new entries — it has ended.',
+      });
+    }
+
     const { data: bankPills, error: bankErr } = await supabase
       .from('pills')
       .select('id')
