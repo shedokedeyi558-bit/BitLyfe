@@ -1,3 +1,16 @@
+/**
+ * VIP / Special Pack endpoints — exam-style, one shared timer, pass threshold.
+ * Mirrors the logic in pillsSpecial.js but serves the /api/pills/vip/* paths
+ * that the frontend calls, with the response envelope the frontend expects.
+ *
+ * Routes:
+ *   POST /api/pills/vip/start
+ *   POST /api/pills/vip/answer/:sessionId
+ *
+ * Both VIP (is_vip=true) and special (pack_type='special') packs are accepted.
+ * Attempts are stored in the special_attempts table (one row per player/pack).
+ */
+
 const express = require('express');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
@@ -8,23 +21,37 @@ const { deductEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
-/**
- * Helper: fetch ordered pills for a VIP pack (by created_at, available only)
- */
-async function getVipPills(packId) {
-  const { data, error } = await supabase
-    .from('pills')
-    .select('id, question, format, options, correct_answer, timer_seconds, color, case_sensitive, spelling_tolerance')
-    .eq('pack_id', packId)
-    .eq('status', 'available')
-    .order('created_at', { ascending: true });
-  return { pills: data || [], error };
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+/** Fisher-Yates in-place shuffle */
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 /**
- * Sanitize a pill for sending to player — strip correct_answer
+ * Fetch pills by IDs, re-ordered to match the stored question_ids sequence.
+ * Reads from the shared `pills` table — same table the admin endpoint writes to.
  */
-function sanitizePill(pill, index, total) {
+async function getPillsByIds(ids) {
+  if (!ids || ids.length === 0) return [];
+  const { data } = await supabase
+    .from('pills')
+    .select('id, question, format, options, correct_answer, timer_seconds, color, case_sensitive')
+    .in('id', ids);
+  const map = {};
+  for (const p of data || []) map[p.id] = p;
+  return ids.map((id) => map[id]).filter(Boolean);
+}
+
+/**
+ * Sanitize a pill for the player — strip correct_answer, add question_number.
+ * Uses the pill's own timer_seconds for the per-question timer field.
+ */
+function sanitize(pill, index, total) {
   return {
     question_number: index + 1,
     total_questions: total,
@@ -32,39 +59,66 @@ function sanitizePill(pill, index, total) {
     question: pill.question,
     format: pill.format,
     options: pill.options || null,
-    timer: pill.timer_seconds,
-    color: pill.color || '#00FF66',
+    timer: pill.timer_seconds || 30,
+    color: pill.color || '#8B5CF6',
   };
 }
 
-// ─── POST /api/pills/vip/start ─────────────────────────────────────────────────
+/** Grade a completed attempt — returns { correct_count } */
+async function gradeAttempt(questionIds, answers) {
+  const pills = await getPillsByIds(questionIds);
+  let correct = 0;
+  for (let i = 0; i < pills.length; i++) {
+    const submitted = answers[i];
+    if (submitted !== null && submitted !== undefined && checkAnswer(pills[i], String(submitted))) {
+      correct++;
+    }
+  }
+  return { correct_count: correct };
+}
+
+/** Seconds remaining for an in-progress attempt (floor at 0) */
+function secondsRemaining(startedAt, totalTimeSeconds) {
+  const elapsed = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000);
+  return Math.max(0, totalTimeSeconds - elapsed);
+}
+
+// ─── POST /api/pills/vip/start ────────────────────────────────────────────────
 
 /**
  * POST /api/pills/vip/start
- * Charge entry fee and start (or resume) a VIP pack attempt.
- * Idempotent: if an in_progress attempt already exists, resume it.
- * Body: { packId, idempotency_key? }
+ * Start or resume a VIP/Special pack attempt.
  *
- * Response shapes:
- *   New attempt:
- *   { success: true, session_id, resumed: false, question: {...}, questions_remaining: N }
+ * New attempt:   charge fee, draw randomized question set, insert into special_attempts.
+ * Resume:        return current question + time_remaining (no new charge).
+ * Already done:  HTTP 409, ALREADY_ATTEMPTED.
  *
- *   Resumed attempt:
- *   { success: true, session_id, resumed: true, question: {...}, questions_remaining: N }
+ * Body: { packId } or { pack_id }
+ *
+ * Success response:
+ * {
+ *   success: true,
+ *   data: {
+ *     session_id, pack_id, pack_name, category, entry_fee, prize,
+ *     total_questions, required_correct, current_question_index,
+ *     is_new_attempt, new_balance, exam_duration,
+ *     question: { question, format, options, timer }
+ *   }
+ * }
  */
 router.post('/start', idempotency(), auth, async (req, res) => {
   try {
-    const { packId } = req.body;
+    const packId = req.body.packId || req.body.pack_id;
     const player = req.player;
 
     if (!packId) {
       return res.status(400).json({ success: false, error: 'packId is required' });
     }
 
-    // Fetch pack — must be VIP and active
+    // Fetch pack — must be vip/special type and active
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, entry_fee, prize, is_vip, status, required_correct, total_time_seconds, question_count')
+      .select('id, name, category, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end')
       .eq('id', packId)
       .single();
 
@@ -72,121 +126,231 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pack not found' });
     }
 
-    if (!pack.is_vip) {
-      return res.status(400).json({ success: false, error: 'This pack is not a VIP pack. Use POST /api/pills/open instead.' });
+    const isSpecial = pack.pack_type === 'special' || pack.is_vip === true;
+    if (!isSpecial) {
+      return res.status(400).json({
+        success: false,
+        error: 'This is not a VIP/Special pack. Use POST /api/pills/open instead.',
+      });
     }
 
     if (pack.status !== 'active') {
-      return res.status(409).json({ success: false, error: 'VIP pack is not currently active' });
+      return res.status(409).json({ success: false, error: 'This pack is not currently active' });
     }
 
+    // Check entry window (if set)
+    if (pack.entry_window_end && new Date(pack.entry_window_end) < new Date()) {
+      return res.status(409).json({
+        success: false,
+        code: 'ENTRY_CLOSED',
+        error: 'Entry window for this pack has closed',
+      });
+    }
+
+    const questionCount = pack.question_count || null; // null → use all available pills
+    const totalTimeSecs = pack.total_time_seconds || 600;
     const entryFee = pack.entry_fee ? parseFloat(pack.entry_fee) : 0;
 
-    // Check if player already has an attempt for this pack
-    const { data: existingAttempt } = await supabase
-      .from('vip_attempts')
-      .select('id, current_question_index, status')
+    // Check for an existing attempt (UNIQUE player_id+pack_id in special_attempts)
+    const { data: existing } = await supabase
+      .from('special_attempts')
+      .select('id, status, current_question_index, question_ids, answers, started_at, total_time_seconds')
       .eq('player_id', player.id)
       .eq('pack_id', packId)
       .maybeSingle();
 
-    if (existingAttempt) {
-      if (existingAttempt.status === 'in_progress') {
-        // Resume — no new charge
-        const { pills } = await getVipPills(packId);
-
-        if (existingAttempt.current_question_index >= pills.length) {
-          return res.status(409).json({ success: false, error: 'All questions answered — no further questions available' });
-        }
-
-        const currentPill = pills[existingAttempt.current_question_index];
-
-        return res.json({
-          success: true,
-          resumed: true,
-          session_id: existingAttempt.id,
-          question: sanitizePill(currentPill, existingAttempt.current_question_index, pills.length),
-          questions_remaining: pills.length - existingAttempt.current_question_index,
-          required_correct: pack.required_correct || pills.length,
-          exam_duration: pack.total_time_seconds || null,
-          newBalance: player.balance,
+    if (existing) {
+      // Completed attempt — reject
+      if (existing.status === 'passed' || existing.status === 'failed') {
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_ATTEMPTED',
+          error: 'Already attempted',
         });
       }
 
-      if (existingAttempt.status === 'won') {
-        return res.status(409).json({ success: false, code: 'ALREADY_ATTEMPTED', error: 'You have already completed this Special' });
+      // In-progress — check time
+      const secsLeft = secondsRemaining(existing.started_at, existing.total_time_seconds);
+
+      if (secsLeft <= 0) {
+        // Time expired — grade and close
+        const questionIds = existing.question_ids || [];
+        const answers = existing.answers || [];
+        const { correct_count } = await gradeAttempt(questionIds, answers);
+        const requiredCorrect = pack.required_correct || questionIds.length;
+        const passed = correct_count >= requiredCorrect;
+        const finalStatus = passed ? 'passed' : 'failed';
+
+        await supabase
+          .from('special_attempts')
+          .update({ status: finalStatus, correct_count, completed_at: new Date().toISOString() })
+          .eq('id', existing.id);
+
+        let newBalance = player.balance;
+        if (passed && pack.prize) {
+          const prize = parseFloat(pack.prize);
+          const { data: fresh } = await supabase.from('players').select('balance').eq('id', player.id).single();
+          newBalance = (fresh?.balance || 0) + prize;
+          await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
+          await supabase.from('transactions').insert({
+            player_id: player.id, type: 'pill_win', amount: prize,
+            description: `Passed VIP pack: ${pack.name}`,
+          });
+          await createNotification(player.id, 'win', 'VIP Pack Passed! 🎉',
+            `You passed "${pack.name}" with ${correct_count}/${questionIds.length} correct! ₦${prize.toLocaleString()} credited.`);
+        }
+
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_ATTEMPTED',
+          error: 'Already attempted',
+          timed_out: true,
+          result: finalStatus,
+        });
       }
 
-      if (existingAttempt.status === 'failed') {
-        return res.status(409).json({ success: false, code: 'ALREADY_ATTEMPTED', error: 'You have already attempted this Special. One attempt per account.' });
-      }
+      // Resume — still time left
+      const questionIds = existing.question_ids || [];
+      const idx = existing.current_question_index;
+      const pills = await getPillsByIds(questionIds);
+
+      return res.json({
+        success: true,
+        data: {
+          session_id: existing.id,
+          pack_id: pack.id,
+          pack_name: pack.name,
+          category: pack.category || null,
+          entry_fee: entryFee,
+          prize: pack.prize ? parseFloat(pack.prize) : 0,
+          total_questions: pills.length,
+          required_correct: pack.required_correct || pills.length,
+          current_question_index: idx,
+          is_new_attempt: false,
+          new_balance: player.balance,
+          exam_duration: existing.total_time_seconds,
+          time_remaining_seconds: secsLeft,
+          question: sanitize(pills[idx], idx, pills.length),
+        },
+      });
     }
 
-    // Validate minimum 10 questions
-    const { pills, error: pillsErr } = await getVipPills(packId);
-    if (pillsErr) {
+    // ── New attempt ────────────────────────────────────────────────────────────
+
+    // Fetch available pills from the shared `pills` table, filtered by pack_id only
+    const { data: bankPills, error: bankErr } = await supabase
+      .from('pills')
+      .select('id')
+      .eq('pack_id', packId)
+      .eq('status', 'available');
+
+    if (bankErr) {
+      console.error('VIP start — pills query error:', bankErr);
       return res.status(500).json({ success: false, error: 'Failed to fetch pack questions' });
     }
 
-    if (pills.length < 10) {
+    const bankSize = (bankPills || []).length;
+    const effectiveQuestionCount = questionCount || bankSize;
+
+    if (bankSize < effectiveQuestionCount) {
       return res.status(409).json({
         success: false,
         code: 'INSUFFICIENT_QUESTIONS',
-        error: `VIP pack has only ${pills.length} questions. Minimum is 10.`,
+        error: `Pack has only ${bankSize} available question(s), needs at least ${effectiveQuestionCount}.`,
       });
     }
 
-    // Check balance (bonus + real combined)
-    if ((player.balance || 0) + (player.bonus_balance || 0) < entryFee) {
+    if (bankSize === 0) {
+      return res.status(409).json({
+        success: false,
+        code: 'INSUFFICIENT_QUESTIONS',
+        error: 'This pack has no available questions yet.',
+      });
+    }
+
+    // Check balance
+    if (entryFee > 0 && (player.balance || 0) + (player.bonus_balance || 0) < entryFee) {
       return res.status(402).json({ success: false, error: 'Insufficient balance' });
     }
 
-    // Charge entry fee — bonus first, real balance for remainder. Transaction recorded inside.
-    let billing;
-    try {
-      billing = await deductEntryFee(player.id, entryFee, {
-        type: 'pill_open',
-        description: `VIP pack entry: ${pack.name}`,
-      });
-    } catch (billingErr) {
-      if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
-      throw billingErr;
+    // Charge entry fee
+    let billing = null;
+    if (entryFee > 0) {
+      try {
+        billing = await deductEntryFee(player.id, entryFee, {
+          type: 'pill_open',
+          description: `VIP pack entry: ${pack.name}`,
+        });
+      } catch (billingErr) {
+        if (billingErr.insufficientFunds) {
+          return res.status(402).json({ success: false, error: billingErr.message });
+        }
+        throw billingErr;
+      }
     }
 
-    // Create attempt
+    // Randomly draw effectiveQuestionCount pills from the bank
+    const allIds = (bankPills || []).map((p) => p.id);
+    shuffle(allIds);
+    const selectedIds = allIds.slice(0, effectiveQuestionCount);
+
+    // Create attempt row in special_attempts
     const { data: attempt, error: attemptErr } = await supabase
-      .from('vip_attempts')
+      .from('special_attempts')
       .insert({
         player_id: player.id,
         pack_id: packId,
+        question_ids: selectedIds,
         current_question_index: 0,
+        answers: new Array(effectiveQuestionCount).fill(null),
+        total_time_seconds: totalTimeSecs,
         status: 'in_progress',
+        correct_count: 0,
       })
       .select('id')
       .single();
 
     if (attemptErr) {
-      // Refund if insert failed — restore both deducted amounts
-      if (entryFee > 0 && billing) {
+      // Refund if insert failed
+      if (billing) {
         await supabase.from('players').update({
           balance: player.balance,
           bonus_balance: player.bonus_balance || 0,
         }).eq('id', player.id);
       }
+      if (attemptErr.code === '23505') {
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_ATTEMPTED',
+          error: 'Already attempted',
+        });
+      }
+      console.error('VIP start — attempt insert error:', attemptErr);
       return res.status(500).json({ success: false, error: 'Failed to start VIP attempt' });
     }
 
+    const pills = await getPillsByIds(selectedIds);
+
     return res.status(201).json({
       success: true,
-      resumed: false,
-      session_id: attempt.id,
-      question: sanitizePill(pills[0], 0, pills.length),
-      questions_remaining: pills.length,
-      required_correct: pack.required_correct || pills.length,
-      exam_duration: pack.total_time_seconds || null,
-      newBalance: billing ? billing.newBalance : player.balance,
-      newBonusBalance: billing ? billing.newBonusBalance : (player.bonus_balance || 0),
-      bonusUsed: billing ? billing.bonusUsed : 0,
+      data: {
+        session_id: attempt.id,
+        pack_id: pack.id,
+        pack_name: pack.name,
+        category: pack.category || null,
+        entry_fee: entryFee,
+        prize: pack.prize ? parseFloat(pack.prize) : 0,
+        total_questions: effectiveQuestionCount,
+        required_correct: pack.required_correct || effectiveQuestionCount,
+        current_question_index: 0,
+        is_new_attempt: true,
+        new_balance: billing ? billing.newBalance : player.balance,
+        new_bonus_balance: billing ? billing.newBonusBalance : (player.bonus_balance || 0),
+        bonus_used: billing ? billing.bonusUsed : 0,
+        exam_duration: totalTimeSecs,
+        time_remaining_seconds: totalTimeSecs,
+        question: sanitize(pills[0], 0, pills.length),
+      },
     });
   } catch (err) {
     console.error('VIP start error:', err);
@@ -194,27 +358,31 @@ router.post('/start', idempotency(), auth, async (req, res) => {
   }
 });
 
-// ─── POST /api/pills/vip/answer/:sessionId ─────────────────────────────────────
+// ─── POST /api/pills/vip/answer/:sessionId ────────────────────────────────────
 
 /**
  * POST /api/pills/vip/answer/:sessionId
- * Submit answer for the current question in a VIP attempt.
+ * Submit answer for the current question in a VIP/Special attempt.
  *
- * Correct + more questions remain → advance to next, return next question
- * Correct + was last question    → mark won, credit prize, return result
- * Incorrect                      → mark failed, no refund, return which question + correct answer
+ * Non-final question:
+ * {
+ *   success: true,
+ *   data: {
+ *     correct, correct_answer, next_question, next_question_index,
+ *     streak_complete: false, entry_fee, question_number
+ *   }
+ * }
+ *
+ * Final question (all answered):
+ * {
+ *   success: true,
+ *   data: {
+ *     correct, correct_answer, streak_complete: true,
+ *     passed, score, prize, new_balance, entry_fee, question_number
+ *   }
+ * }
  *
  * Body: { answer }
- *
- * Response shapes:
- *   Correct, more remain:
- *   { success: true, result: "correct", next_question: {...}, questions_remaining: N }
- *
- *   Correct, last question (won):
- *   { success: true, result: "won", prize: N, newBalance: N, message: "..." }
- *
- *   Incorrect (failed):
- *   { success: true, result: "failed", failed_on_question: N, correct_answer: "...", message: "..." }
  */
 router.post('/answer/:sessionId', auth, async (req, res) => {
   try {
@@ -222,14 +390,14 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
     const { answer } = req.body;
     const player = req.player;
 
-    if (!answer && answer !== '0') {
-      return res.status(400).json({ success: false, error: 'answer is required' });
+    if (answer === undefined || answer === null) {
+      return res.status(400).json({ success: false, error: 'answer is required (send empty string to skip)' });
     }
 
-    // Fetch attempt
+    // Fetch attempt from special_attempts
     const { data: attempt, error: attemptErr } = await supabase
-      .from('vip_attempts')
-      .select('id, player_id, pack_id, current_question_index, status')
+      .from('special_attempts')
+      .select('id, player_id, pack_id, question_ids, current_question_index, answers, started_at, total_time_seconds, status')
       .eq('id', sessionId)
       .single();
 
@@ -244,137 +412,122 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
     if (attempt.status !== 'in_progress') {
       return res.status(409).json({
         success: false,
-        code: attempt.status === 'won' ? 'ALREADY_WON' : 'ALREADY_FAILED',
-        error: `This VIP session has already ended with status: ${attempt.status}`,
+        code: attempt.status === 'passed' ? 'ALREADY_WON' : 'ALREADY_FAILED',
+        error: `This session has already ended with status: ${attempt.status}`,
       });
     }
 
-    // Fetch pack for prize value
-    const { data: pack } = await supabase
-      .from('pill_packs')
-      .select('name, prize')
-      .eq('id', attempt.pack_id)
-      .single();
-
-    // Fetch ordered pills
-    const { pills } = await getVipPills(attempt.pack_id);
-
-    if (pills.length === 0) {
-      return res.status(500).json({ success: false, error: 'No questions available for this pack' });
-    }
-
+    const questionIds = attempt.question_ids || [];
+    const currentAnswers = attempt.answers || new Array(questionIds.length).fill(null);
     const idx = attempt.current_question_index;
+    const secsLeft = secondsRemaining(attempt.started_at, attempt.total_time_seconds);
+    const timedOut = secsLeft <= 0;
 
-    if (idx >= pills.length) {
+    if (idx >= questionIds.length) {
       return res.status(409).json({ success: false, error: 'All questions already answered' });
     }
 
-    const currentPill = pills[idx];
-
-    // Check answer using shared normalizer (trim, lowercase, strip trailing punctuation)
-    const correct = checkAnswer(currentPill, String(answer));
-
-    if (!correct) {
-      // Mark attempt as failed
-      await supabase
-        .from('vip_attempts')
-        .update({ status: 'failed', completed_at: new Date().toISOString() })
-        .eq('id', sessionId);
-
-      return res.json({
-        success: true,
-        result: 'failed',
-        streak_complete: true,
-        passed: false,
-        score: idx,    // number correct before failing (questions answered correctly up to this point)
-        failed_on_question: idx + 1,
-        total_questions: pills.length,
-        correct_answer: currentPill.correct_answer,
-        message: `Incorrect on question ${idx + 1}. No refund — better luck next time!`,
-      });
+    // Fetch the current pill to validate the answer and get correct_answer for response
+    const [currentPill] = await getPillsByIds([questionIds[idx]]);
+    if (!currentPill) {
+      return res.status(500).json({ success: false, error: 'Could not load current question' });
     }
 
-    // Correct answer
-    const isLastQuestion = idx + 1 >= pills.length;
+    const isCorrect = checkAnswer(currentPill, String(answer));
+    currentAnswers[idx] = String(answer);
+    const nextIdx = idx + 1;
+    const isLastQuestion = nextIdx >= questionIds.length;
 
-    if (isLastQuestion) {
-      // Player has answered all questions correctly — they won
-      const prize = pack?.prize ? parseFloat(pack.prize) : 0;
+    // Fetch pack for prize/threshold
+    const { data: pack } = await supabase
+      .from('pill_packs')
+      .select('name, entry_fee, prize, required_correct, question_count')
+      .eq('id', attempt.pack_id)
+      .single();
+
+    const entryFee = pack?.entry_fee ? parseFloat(pack.entry_fee) : 0;
+    const requiredCorrect = pack?.required_correct || questionIds.length;
+
+    // Complete attempt if last question answered or time ran out
+    if (isLastQuestion || timedOut) {
+      const { correct_count } = await gradeAttempt(questionIds, currentAnswers);
+      const passed = correct_count >= requiredCorrect;
+      const finalStatus = passed ? 'passed' : 'failed';
 
       await supabase
-        .from('vip_attempts')
+        .from('special_attempts')
         .update({
-          status: 'won',
-          current_question_index: idx + 1,
+          answers: currentAnswers,
+          current_question_index: nextIdx,
+          status: finalStatus,
+          correct_count,
           completed_at: new Date().toISOString(),
         })
         .eq('id', sessionId);
 
-      if (prize > 0) {
-        const { data: freshPlayer } = await supabase
-          .from('players')
-          .select('balance')
-          .eq('id', player.id)
-          .single();
+      let newBalance = player.balance;
+      let prizeCredited = 0;
 
-        const newBalance = (freshPlayer?.balance || 0) + prize;
-
+      if (passed && pack?.prize) {
+        const prize = parseFloat(pack.prize);
+        prizeCredited = prize;
+        const { data: fresh } = await supabase.from('players').select('balance').eq('id', player.id).single();
+        newBalance = (fresh?.balance || 0) + prize;
         await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
-
         await supabase.from('transactions').insert({
           player_id: player.id,
           type: 'pill_win',
           amount: prize,
-          description: `Won VIP pack: ${pack?.name || attempt.pack_id}`,
+          description: `Passed VIP pack: ${pack.name}`,
         });
-
         await createNotification(
           player.id, 'win',
-          'VIP Pack Complete! 🏆',
-          `You answered all ${pills.length} questions correctly! ₦${prize.toLocaleString()} credited to your wallet.`
+          'VIP Pack Passed! 🏆',
+          `You passed "${pack.name}" with ${correct_count}/${questionIds.length} correct! ₦${prize.toLocaleString()} credited.`
         );
-
-        return res.json({
-          success: true,
-          result: 'won',
-          streak_complete: true,
-          passed: true,
-          score: pills.length,    // all correct — won means perfect in this mode
-          prize,
-          newBalance,
-          total_questions: pills.length,
-          message: `You answered all ${pills.length} questions correctly! ₦${prize.toLocaleString()} won.`,
-        });
       }
 
       return res.json({
         success: true,
-        result: 'won',
-        streak_complete: true,
-        passed: true,
-        score: pills.length,
-        prize: 0,
-        total_questions: pills.length,
-        message: `You answered all ${pills.length} questions correctly!`,
+        data: {
+          correct: isCorrect,
+          correct_answer: currentPill.correct_answer,
+          streak_complete: true,
+          passed,
+          score: correct_count,
+          prize: prizeCredited,
+          new_balance: newBalance,
+          entry_fee: entryFee,
+          question_number: idx + 1,
+          total_questions: questionIds.length,
+          required_correct: requiredCorrect,
+          timed_out: timedOut && !isLastQuestion,
+        },
       });
     }
 
-    // Correct, more questions remain — advance to next
-    const nextIdx = idx + 1;
-
+    // More questions remain — advance
     await supabase
-      .from('vip_attempts')
-      .update({ current_question_index: nextIdx })
+      .from('special_attempts')
+      .update({ answers: currentAnswers, current_question_index: nextIdx })
       .eq('id', sessionId);
 
+    const pills = await getPillsByIds(questionIds);
     const nextPill = pills[nextIdx];
 
     return res.json({
       success: true,
-      result: 'correct',
-      streak_complete: false,
-      next_question: sanitizePill(nextPill, nextIdx, pills.length),
-      questions_remaining: pills.length - nextIdx,
+      data: {
+        correct: isCorrect,
+        correct_answer: currentPill.correct_answer,
+        next_question: sanitize(nextPill, nextIdx, questionIds.length),
+        next_question_index: nextIdx,
+        streak_complete: false,
+        entry_fee: entryFee,
+        question_number: idx + 1,
+        questions_remaining: questionIds.length - nextIdx,
+        time_remaining_seconds: Math.max(0, secsLeft),
+      },
     });
   } catch (err) {
     console.error('VIP answer error:', err);

@@ -36,7 +36,7 @@ async function getPillsByIds(ids) {
   if (!ids || ids.length === 0) return [];
   const { data } = await supabase
     .from('pills')
-    .select('id, question, format, options, correct_answer, color, case_sensitive, spelling_tolerance')
+    .select('id, question, format, options, correct_answer, color, case_sensitive')
     .in('id', ids);
   // Re-order to match the stored question_ids sequence
   const map = {};
@@ -99,7 +99,7 @@ function secondsRemaining(startedAt, totalTimeSeconds) {
  */
 router.post('/start', idempotency(), auth, async (req, res) => {
   try {
-    const { packId } = req.body;
+    const packId = req.body.packId || req.body.pack_id;
     const player = req.player;
 
     if (!packId) {
