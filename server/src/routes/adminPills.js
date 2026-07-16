@@ -43,12 +43,38 @@ router.get('/packs', async (req, res) => {
 
     const result = (packs || []).map((pack) => {
       const packPills = pillsByPack[pack.id] || [];
+      const isSpecial = pack.pack_type === 'special' || pack.is_vip;
+      const availableCount = packPills.filter((p) => p.status === 'available').length;
+
+      // ── Entropy / bank-size ratio (Specials only) ────────────────────────
+      // Helps admin know when the question bank is too thin to prevent
+      // meaningful overlap between different players' attempts.
+      // Recommendation: bank >= 3× question_count (e.g. 30 for a 10-question exam).
+      let bankRatio = null;
+      let lowEntropyWarning = null;
+      let recommendedBankSize = null;
+
+      if (isSpecial && pack.question_count) {
+        const qc = pack.question_count;
+        bankRatio = availableCount > 0 ? parseFloat((availableCount / qc).toFixed(2)) : 0;
+        recommendedBankSize = qc * 3;
+        if (availableCount < qc * 3) {
+          lowEntropyWarning = availableCount < qc
+            ? `Bank (${availableCount}) is below question_count (${qc}) — pack cannot start.`
+            : `Bank (${availableCount}) is less than 3× question_count (${qc}). Recommend at least ${recommendedBankSize} questions to minimize overlap between attempts.`;
+        }
+      }
+
       return {
         ...pack,
         pills: packPills,
-        available_count: packPills.filter((p) => p.status === 'available').length,
+        available_count: availableCount,
         played_count: packPills.filter((p) => p.status === 'played').length,
         expired_count: packPills.filter((p) => p.status === 'expired').length,
+        // ── Entropy fields ─────────────────────────────────────────────────
+        bank_ratio: bankRatio,
+        low_entropy_warning: lowEntropyWarning,
+        recommended_bank_size: recommendedBankSize,
       };
     });
 
@@ -266,9 +292,12 @@ router.put('/packs/:packId', async (req, res) => {
           });
         }
 
-        // Warn (not block) if bank isn't meaningfully larger than question_count
-        const warning = (pillCount || 0) < required * 2
-          ? `Question bank (${pillCount}) is less than 2× question_count (${required}). Consider adding more for better per-player randomization.`
+        // Warn (not block) if bank isn't meaningfully larger than question_count.
+        // Recommendation: bank >= 3× question_count so overlap between attempts is uncommon.
+        // Example: 10-question exam needs 30+ questions in the bank.
+        const recommendedMin = required * 3;
+        const warning = (pillCount || 0) < recommendedMin
+          ? `Low entropy: bank has ${pillCount || 0} question(s) but needs at least ${recommendedMin} (3× question_count of ${required}) to keep overlap low between different players' attempts. Add ${Math.max(0, recommendedMin - (pillCount || 0))} more question(s).`
           : null;
 
         if (warning) {
@@ -367,7 +396,46 @@ router.post('/packs/:packId/pills', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to create pill: ' + error.message });
 
-    return res.status(201).json({ success: true, data: { pill: data } });
+    // Return the current bank entropy ratio so the admin UI can show it after each pill added
+    const { count: currentBankSize } = await supabase
+      .from('pills')
+      .select('id', { count: 'exact', head: true })
+      .eq('pack_id', packId)
+      .eq('status', 'available');
+
+    // Fetch pack's question_count for the ratio calculation
+    const { data: packMeta } = await supabase
+      .from('pill_packs')
+      .select('question_count, pack_type, is_vip')
+      .eq('id', packId)
+      .single();
+
+    const isSpecialPack = packMeta?.pack_type === 'special' || packMeta?.is_vip;
+    const qc = packMeta?.question_count || null;
+    const bankSize = currentBankSize || 0;
+    const recommendedBankSize = qc ? qc * 3 : null;
+    const bankRatio = qc && bankSize > 0 ? parseFloat((bankSize / qc).toFixed(2)) : null;
+    let lowEntropyWarning = null;
+    if (isSpecialPack && qc) {
+      if (bankSize < qc) {
+        lowEntropyWarning = `Bank (${bankSize}) is below question_count (${qc}) — pack cannot start yet.`;
+      } else if (bankSize < qc * 3) {
+        lowEntropyWarning = `Bank (${bankSize}) is less than 3× question_count (${qc}). Add ${Math.max(0, (qc * 3) - bankSize)} more to reach the recommended ${qc * 3}.`;
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        pill: data,
+        // ── Bank entropy summary (Specials only) ──────────────────────────
+        bank_size: bankSize,
+        question_count: qc,
+        bank_ratio: bankRatio,
+        recommended_bank_size: recommendedBankSize,
+        low_entropy_warning: lowEntropyWarning,
+      },
+    });
   } catch (err) {
     console.error('Create pill in pack error:', err);
     return res.status(500).json({ success: false, error: 'Failed to create pill' });
