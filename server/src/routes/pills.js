@@ -87,16 +87,25 @@ async function checkSpendLimit(playerId, chargeAmount) {
  * Returns active packs that have at least one available pill.
  * Each pill shows status "played" if this player already played it.
  * Does NOT expose question, options, or correct_answer.
+ *
+ * Pre-payment safe — requires only a valid player JWT, no charge occurs here.
+ *
+ * Every pack in the response includes the full set of fields needed to render
+ * the pre-payment challenge phrase on the frontend:
+ *   entry_fee, prize_amount, question_count, time_limit_minutes,
+ *   pass_threshold (Specials only), available_question_count
  */
 router.get('/packs', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
 
     // Fetch all active packs — standard and specials together.
-    // Frontend uses is_vip to distinguish specials from standard packs.
+    // Frontend uses is_vip / pack_type to distinguish specials from standard packs.
+    // Include all Specials-related fields so the pre-payment screen can render
+    // the correct challenge phrase without a separate request.
     const { data: packs, error: packsErr } = await supabase
       .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, is_featured')
+      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, is_featured, question_count, total_time_seconds, required_correct, entry_window_end')
       .eq('status', 'active')
       .order('is_featured', { ascending: false })  // featured pack sorts first
       .order('created_at', { ascending: false });
@@ -157,18 +166,49 @@ router.get('/packs', auth, async (req, res) => {
 
     // Only return packs where at least one pill hasn't been played by this player
     const result = packs
-      .map((pack) => ({
-        id: pack.id,
-        name: pack.name,
-        category: pack.category,
-        status: pack.status,
-        is_featured: pack.is_featured || false,
-        is_vip: pack.is_vip || false,        // actual DB value — true for Specials
-        pack_type: pack.pack_type || 'standard',
-        entry_fee: pack.entry_fee !== null && pack.entry_fee !== undefined ? parseFloat(pack.entry_fee) : null,
-        prize: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
-        pills: pillsByPack[pack.id] || [],
-      }))
+      .map((pack) => {
+        const packPills = pillsByPack[pack.id] || [];
+        const isSpecial = pack.pack_type === 'special' || pack.is_vip;
+
+        // Derive time_limit_minutes from total_time_seconds (round up to nearest minute)
+        const timeLimitMinutes = pack.total_time_seconds
+          ? Math.ceil(pack.total_time_seconds / 60)
+          : null;
+
+        return {
+          id: pack.id,
+          name: pack.name,
+          category: pack.category,
+          status: pack.status,
+          is_featured: pack.is_featured || false,
+          is_vip: pack.is_vip || false,
+          pack_type: pack.pack_type || 'standard',
+
+          // ── Payment / prize fields (pre-payment challenge phrase) ──────────
+          entry_fee: pack.entry_fee !== null && pack.entry_fee !== undefined ? parseFloat(pack.entry_fee) : null,
+          prize_amount: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
+          // keep 'prize' as an alias so nothing that already reads it breaks
+          prize: pack.prize !== null && pack.prize !== undefined ? parseFloat(pack.prize) : null,
+
+          // ── Exam / challenge-phrase fields ────────────────────────────────
+          // question_count: how many questions will be drawn per attempt
+          question_count: isSpecial ? (pack.question_count || null) : null,
+          // total_time_seconds: raw value for anything that needs it
+          total_time_seconds: isSpecial ? (pack.total_time_seconds || null) : null,
+          // time_limit_minutes: human-readable for the challenge phrase
+          time_limit_minutes: isSpecial ? timeLimitMinutes : null,
+          // pass_threshold: minimum correct answers to pass (Specials only)
+          pass_threshold: isSpecial ? (pack.required_correct || null) : null,
+          // required_correct: alias — same value, some code may use either name
+          required_correct: isSpecial ? (pack.required_correct || null) : null,
+          // entry_window_end: when entries close (Specials only)
+          entry_window_end: isSpecial ? (pack.entry_window_end || null) : null,
+          // available_question_count: live bank size for "X questions" in challenge phrase
+          available_question_count: packPills.filter((p) => p.status === 'available').length,
+
+          pills: packPills,
+        };
+      })
       .filter((pack) => pack.pills.some((pill) => pill.status === 'available'));
 
     return res.json({ success: true, data: { packs: result } });
@@ -183,6 +223,12 @@ router.get('/packs', auth, async (req, res) => {
  * Returns all active Special packs for the player-facing Specials section.
  * Includes packs where pack_type = 'special' OR is_vip = true (legacy flag).
  * Does NOT include pills — specials use the start endpoint, not individual pill selection.
+ *
+ * Pre-payment safe — requires only a valid player JWT, no charge occurs here.
+ *
+ * Returns all fields needed to render the pre-payment challenge phrase:
+ *   entry_fee, prize_amount, question_count, time_limit_minutes, pass_threshold,
+ *   available_question_count (live bank size), entry_window_end.
  */
 router.get('/specials', auth, async (req, res) => {
   try {
@@ -198,22 +244,58 @@ router.get('/specials', auth, async (req, res) => {
     }
 
     const now = new Date();
-    const result = (packs || [])
-      .filter((p) => !p.entry_window_end || new Date(p.entry_window_end) > now)
-      .map((p) => ({
+    const activePacks = (packs || []).filter(
+      (p) => !p.entry_window_end || new Date(p.entry_window_end) > now
+    );
+
+    // Fetch live available pill counts for all these packs in one query
+    const packIds = activePacks.map((p) => p.id);
+    let availableCountByPack = {};
+
+    if (packIds.length > 0) {
+      const { data: pillCounts } = await supabase
+        .from('pills')
+        .select('pack_id')
+        .in('pack_id', packIds)
+        .eq('status', 'available');
+
+      for (const row of pillCounts || []) {
+        availableCountByPack[row.pack_id] = (availableCountByPack[row.pack_id] || 0) + 1;
+      }
+    }
+
+    const result = activePacks.map((p) => {
+      const timeLimitMinutes = p.total_time_seconds
+        ? Math.ceil(p.total_time_seconds / 60)
+        : null;
+
+      return {
         id: p.id,
         name: p.name,
         category: p.category,
         status: p.status,
         is_vip: true,                    // always true for specials — frontend checks this
         pack_type: p.pack_type || 'special',
+
+        // ── Payment / prize fields (pre-payment challenge phrase) ────────────
         entry_fee: p.entry_fee ? parseFloat(p.entry_fee) : null,
-        prize: p.prize ? parseFloat(p.prize) : null,
+        prize_amount: p.prize ? parseFloat(p.prize) : null,
+        prize: p.prize ? parseFloat(p.prize) : null,   // alias — keep for backward compat
+
+        // ── Exam / challenge-phrase fields ───────────────────────────────────
         question_count: p.question_count || null,
         total_time_seconds: p.total_time_seconds || null,
-        required_correct: p.required_correct || null,
+        // time_limit_minutes: ready-to-display for "X minutes" in challenge phrase
+        time_limit_minutes: timeLimitMinutes,
+        // pass_threshold / required_correct: minimum correct answers to pass
+        pass_threshold: p.required_correct || null,
+        required_correct: p.required_correct || null,  // alias
+        // entry_window_end: when entries close
         entry_window_end: p.entry_window_end || null,
-      }));
+        // available_question_count: live bank — how many questions the admin has added
+        available_question_count: availableCountByPack[p.id] || 0,
+      };
+    });
 
     return res.json({ success: true, data: { specials: result } });
   } catch (err) {
