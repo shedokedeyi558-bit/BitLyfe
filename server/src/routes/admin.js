@@ -688,6 +688,85 @@ router.get('/analytics/activity', async (req, res) => {
 });
 
 // ─── EXPORT ───────────────────────────────────────────────────────────────────
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/admin/notifications/broadcast
+ * Send a notification to every active player at once.
+ *
+ * Body: { title: string (max 80), message: string (max 300), type?: string }
+ * type is always stored as "announcement" regardless of what is sent.
+ *
+ * Returns: { success: true, data: { message: "Notification sent", sent_count: N } }
+ */
+router.post('/notifications/broadcast', async (req, res) => {
+  try {
+    const { title, message } = req.body;
+
+    // Validate required fields
+    if (!title || typeof title !== 'string' || title.trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'title is required and must be a non-empty string' });
+    }
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'message is required and must be a non-empty string' });
+    }
+    if (title.trim().length > 80) {
+      return res.status(400).json({ success: false, error: 'title must be 80 characters or fewer' });
+    }
+    if (message.trim().length > 300) {
+      return res.status(400).json({ success: false, error: 'message must be 300 characters or fewer' });
+    }
+
+    const cleanTitle = title.trim();
+    const cleanMessage = message.trim();
+    const now = new Date().toISOString();
+
+    // Fetch all active player IDs
+    const { data: players, error: playersErr } = await supabase
+      .from('players')
+      .select('id')
+      .eq('status', 'active');
+
+    if (playersErr) {
+      console.error('Broadcast — player fetch error:', playersErr);
+      return res.status(500).json({ success: false, error: 'Failed to fetch players' });
+    }
+
+    if (!players || players.length === 0) {
+      return res.json({ success: true, data: { message: 'Notification sent', sent_count: 0 } });
+    }
+
+    // Build bulk insert rows — one per active player
+    const rows = players.map((p) => ({
+      player_id:  p.id,
+      type:       'announcement',   // always fixed — never use a player-facing type here
+      title:      cleanTitle,
+      message:    cleanMessage,
+      read:       false,
+      created_at: now,
+    }));
+
+    // Bulk insert — Supabase handles batching internally
+    const { error: insertErr } = await supabase.from('notifications').insert(rows);
+
+    if (insertErr) {
+      console.error('Broadcast — insert error:', insertErr);
+      return res.status(500).json({ success: false, error: 'Failed to send notifications' });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        message: 'Notification sent',
+        sent_count: rows.length,
+      },
+    });
+  } catch (err) {
+    console.error('Broadcast notification error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to send broadcast notification' });
+  }
+});
+
 // ─── EXPORT ───────────────────────────────────────────────────────────────────
 
 /**
