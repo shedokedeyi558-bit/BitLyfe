@@ -40,7 +40,7 @@ async function getPillsByIds(ids) {
   if (!ids || ids.length === 0) return [];
   const { data } = await supabase
     .from('pills')
-    .select('id, question, format, options, correct_answer, timer_seconds, color, case_sensitive')
+    .select('id, question, format, options, correct_answer, color, case_sensitive')
     .in('id', ids);
   const map = {};
   for (const p of data || []) map[p.id] = p;
@@ -49,7 +49,7 @@ async function getPillsByIds(ids) {
 
 /**
  * Sanitize a pill for the player — strip correct_answer, add question_number.
- * Uses the pill's own timer_seconds for the per-question timer field.
+ * No per-question timer — exam uses a single shared countdown (exam_duration).
  */
 function sanitize(pill, index, total) {
   return {
@@ -59,7 +59,6 @@ function sanitize(pill, index, total) {
     question: pill.question,
     format: pill.format,
     options: pill.options || null,
-    timer: pill.timer_seconds || 30,
     color: pill.color || '#8B5CF6',
   };
 }
@@ -102,7 +101,7 @@ function secondsRemaining(startedAt, totalTimeSeconds) {
  *     session_id, pack_id, pack_name, category, entry_fee, prize,
  *     total_questions, required_correct, current_question_index,
  *     is_new_attempt, new_balance, exam_duration,
- *     question: { question, format, options, timer }
+ *     question: { question_number, total_questions, id, question, format, options, color }
  *   }
  * }
  */
