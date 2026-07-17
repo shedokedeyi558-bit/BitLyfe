@@ -396,11 +396,66 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
     }
 
     if (lockCount === 0) {
-      const existingLocks = attempt.answer_locked_at || [];
+      const existingLocks   = attempt.answer_locked_at || [];
+      const existingAnswers = attempt.answers || [];
+      const existingLockedAt = existingLocks[idx]   || null;
+      const existingAnswer   = existingAnswers[idx];
+
+      if (existingAnswer !== null && existingAnswer !== undefined && String(existingAnswer) === String(answer)) {
+        // Idempotent retry — same player, same answer, connection dropped
+        // Special packs don't reveal correct/incorrect mid-exam, so we return
+        // the same shape as the original: just the locked state + next question
+        const nextIdxRetry = idx + 1;
+        const isLastRetry  = nextIdxRetry >= questionIds.length;
+
+        const { data: retryPack } = await supabase
+          .from('pill_packs')
+          .select('name, prize, required_correct, question_count')
+          .eq('id', attempt.pack_id)
+          .single();
+
+        if (isLastRetry) {
+          const { data: doneAttempt } = await supabase
+            .from('special_attempts')
+            .select('status, correct_count')
+            .eq('id', attemptId)
+            .single();
+          const { data: freshPlayer } = await supabase
+            .from('players').select('balance').eq('id', player.id).single();
+          const requiredCorrectRetry = retryPack?.required_correct || questionIds.length;
+          return res.json({
+            success: true,
+            idempotent_replay: true,
+            result: doneAttempt?.status || 'completed',
+            locked: true,
+            locked_at: existingLockedAt,
+            correct_count: doneAttempt?.correct_count ?? 0,
+            required_correct: requiredCorrectRetry,
+            total_questions: questionIds.length,
+            prize_credited: doneAttempt?.status === 'passed' ? parseFloat(retryPack?.prize || 0) : 0,
+            newBalance: freshPlayer?.balance ?? player.balance,
+          });
+        }
+
+        const retryPills    = await getPillsByIds(questionIds);
+        const nextPillRetry = retryPills[nextIdxRetry];
+        return res.json({
+          success: true,
+          idempotent_replay: true,
+          result: 'next',
+          locked: true,
+          locked_at: existingLockedAt,
+          next_question: nextPillRetry ? sanitize(nextPillRetry, nextIdxRetry, questionIds.length) : null,
+          questions_remaining: questionIds.length - nextIdxRetry,
+          time_remaining_seconds: Math.max(0, secsLeft),
+        });
+      }
+
+      // Different answer — genuine conflict
       return res.status(409).json({
         success: false,
         code: 'ALREADY_ANSWERED',
-        error: 'This question has already been answered',
+        error: 'This question has already been answered with a different answer',
         locked: true,
         locked_at: existingLocks[idx] || null,
         question_number: idx + 1,

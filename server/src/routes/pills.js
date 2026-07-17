@@ -511,7 +511,7 @@ router.post('/submit', auth, async (req, res) => {
     // Verify this player opened this pill
     const { data: play } = await supabase
       .from('pill_plays')
-      .select('id, won, locked_at')
+      .select('id, won, locked_at, submitted_answer')
       .eq('pill_id', pillId)
       .eq('player_id', player.id)
       .single();
@@ -538,11 +538,47 @@ router.post('/submit', auth, async (req, res) => {
     }
 
     if (lockCount === 0) {
-      // Another request already locked this slot — return 409 with locked state
+      // Slot already locked. Check if this is a same-player retry of the same answer
+      // (e.g. slow connection dropped the original response) or a genuine conflict.
+      //
+      // Same answer → idempotent success: return 200 with the locked result so the
+      // frontend can render the "submitted" state without showing an error.
+      //
+      // Different answer → real conflict: reject with 409 so the frontend knows
+      // the question was already answered with something else.
+      const lockedAnswer = play.submitted_answer;
+
+      if (lockedAnswer !== null && lockedAnswer !== undefined && String(lockedAnswer) === String(answer)) {
+        // Idempotent retry — re-derive and return the same result
+        const correct = checkAnswer(pill, String(answer));
+        let prize = parseFloat(pill.prize);
+        if (pill.pack_id) {
+          const { data: pack } = await supabase
+            .from('pill_packs').select('prize').eq('id', pill.pack_id).single();
+          if (pack?.prize !== null && pack?.prize !== undefined) prize = parseFloat(pack.prize);
+        }
+        const { data: freshPlayer } = await supabase
+          .from('players').select('balance').eq('id', player.id).single();
+
+        return res.json({
+          success: true,
+          idempotent_replay: true,
+          data: {
+            won: correct,
+            correctAnswer: pill.correct_answer,
+            prize: correct ? prize : 0,
+            newBalance: freshPlayer?.balance ?? player.balance,
+            locked: true,
+            locked_at: play.locked_at,
+          },
+        });
+      }
+
+      // Different answer — genuine conflict
       return res.status(409).json({
         success: false,
         code: 'ALREADY_ANSWERED',
-        error: 'This question has already been answered',
+        error: 'This question has already been answered with a different answer',
         locked: true,
         locked_at: play.locked_at,
       });

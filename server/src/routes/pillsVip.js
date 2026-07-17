@@ -450,13 +450,86 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
     }
 
     if (lockCount === 0) {
-      // Slot already locked — return the existing locked_at timestamp
-      const existingLocks = attempt.answer_locked_at || [];
-      const existingLockedAt = existingLocks[idx] || null;
+      // Slot already locked. Determine if this is a same-player retry of the same answer
+      // (connection dropped before the original response arrived) or a genuine conflict.
+      const existingLocks   = attempt.answer_locked_at || [];
+      const existingAnswers = attempt.answers || [];
+      const existingLockedAt  = existingLocks[idx]   || null;
+      const existingAnswer    = existingAnswers[idx];
+
+      if (existingAnswer !== null && existingAnswer !== undefined && String(existingAnswer) === String(answer)) {
+        // Idempotent retry — re-derive and return the same result the original request returned
+        const [retryPill] = await getPillsByIds([questionIds[idx]]);
+        const isCorrect   = retryPill ? checkAnswer(retryPill, String(answer)) : false;
+
+        const { data: retryPack } = await supabase
+          .from('pill_packs')
+          .select('name, entry_fee, prize, required_correct, question_count')
+          .eq('id', attempt.pack_id)
+          .single();
+
+        const entryFeeRetry     = retryPack?.entry_fee ? parseFloat(retryPack.entry_fee) : 0;
+        const requiredCorrectRetry = retryPack?.required_correct || questionIds.length;
+        const nextIdxRetry      = idx + 1;
+        const isLastRetry       = nextIdxRetry >= questionIds.length;
+
+        if (isLastRetry) {
+          // Re-fetch final counts for the completed attempt
+          const { data: doneAttempt } = await supabase
+            .from('special_attempts')
+            .select('status, correct_count')
+            .eq('id', sessionId)
+            .single();
+          const { data: freshPlayer } = await supabase
+            .from('players').select('balance').eq('id', player.id).single();
+          return res.json({
+            success: true,
+            idempotent_replay: true,
+            data: {
+              correct: isCorrect,
+              correct_answer: retryPill?.correct_answer ?? null,
+              locked: true,
+              locked_at: existingLockedAt,
+              streak_complete: true,
+              passed: doneAttempt?.status === 'passed',
+              score: doneAttempt?.correct_count ?? 0,
+              prize: doneAttempt?.status === 'passed' ? parseFloat(retryPack?.prize || 0) : 0,
+              new_balance: freshPlayer?.balance ?? player.balance,
+              entry_fee: entryFeeRetry,
+              question_number: idx + 1,
+              total_questions: questionIds.length,
+              required_correct: requiredCorrectRetry,
+            },
+          });
+        }
+
+        // Non-final — return the same "next question" response shape
+        const retryPills   = await getPillsByIds(questionIds);
+        const nextPillRetry = retryPills[nextIdxRetry];
+        return res.json({
+          success: true,
+          idempotent_replay: true,
+          data: {
+            correct: isCorrect,
+            correct_answer: retryPill?.correct_answer ?? null,
+            locked: true,
+            locked_at: existingLockedAt,
+            next_question: nextPillRetry ? sanitize(nextPillRetry, nextIdxRetry, questionIds.length) : null,
+            next_question_index: nextIdxRetry,
+            streak_complete: false,
+            entry_fee: entryFeeRetry,
+            question_number: idx + 1,
+            questions_remaining: questionIds.length - nextIdxRetry,
+            time_remaining_seconds: Math.max(0, secsLeft),
+          },
+        });
+      }
+
+      // Different answer — genuine conflict
       return res.status(409).json({
         success: false,
         code: 'ALREADY_ANSWERED',
-        error: 'This question has already been answered',
+        error: 'This question has already been answered with a different answer',
         locked: true,
         locked_at: existingLockedAt,
         question_number: idx + 1,
