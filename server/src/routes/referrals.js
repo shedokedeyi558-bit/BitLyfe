@@ -179,9 +179,34 @@ router.get('/stats', auth, async (req, res) => {
       .eq('id', playerId)
       .single();
 
-    const referralCode = player?.referral_code || null;
-    const referralLink = referralCode
-      ? `${process.env.FRONTEND_URL || 'https://bitlyfe.app'}/signup?ref=${referralCode}`
+    let referralCode = player?.referral_code || null;
+
+    // Back-fill: players created before referral_code was added may have null.
+    // Generate and persist one on first access so the link is never broken.
+    if (!referralCode) {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let attempts = 0;
+      while (attempts < 10) {
+        let code = '';
+        for (let i = 0; i < 8; i++) code += chars[Math.floor(Math.random() * chars.length)];
+        const { data: clash } = await supabase.from('players').select('id').eq('referral_code', code).maybeSingle();
+        if (!clash) {
+          await supabase.from('players').update({ referral_code: code }).eq('id', playerId);
+          referralCode = code;
+          break;
+        }
+        attempts++;
+      }
+    }
+
+    // Build the referral link using the configured frontend URL.
+    // FRONTEND_URL must be set in the server's environment variables
+    // (e.g. https://bitlyf.vercel.app). Never falls back to a hardcoded
+    // domain — an unset env var returns null so the frontend can show
+    // a "not available" state rather than a broken link.
+    const frontendUrl = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.replace(/\/$/, '') : null;
+    const referralLink = referralCode && frontendUrl
+      ? `${frontendUrl}/auth?ref=${referralCode}`
       : null;
 
     // Fetch all referrals made by this player
