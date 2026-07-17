@@ -229,8 +229,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       .from('pills')
       .select('id')
       .eq('pack_id', packId)
-      .eq('status', 'available')
-      .is('deleted_at', null);   // exclude soft-deleted pills from bank draws
+      .is('deleted_at', null);   // ALL non-deleted pills — Specials are not stock-gated
 
     if (bankErr) return res.status(500).json({ success: false, error: 'Failed to fetch question bank' });
 
