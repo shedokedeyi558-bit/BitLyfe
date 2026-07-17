@@ -594,7 +594,7 @@ router.post('/admin-login', async (req, res) => {
       .select('id, email, password_hash, is_admin')
       .eq('email', email.trim().toLowerCase())
       .eq('is_admin', true)
-      .single();
+      .maybeSingle();
 
     if (player && player.password_hash) {
       const isMatch = await bcrypt.compare(password, player.password_hash);
@@ -619,9 +619,9 @@ router.post('/admin-login', async (req, res) => {
       .from('admins')
       .select('id, email, password_hash')
       .eq('email', email.trim().toLowerCase())
-      .single();
+      .maybeSingle();
 
-    if (error || !admin) {
+    if (!admin) {
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
 
