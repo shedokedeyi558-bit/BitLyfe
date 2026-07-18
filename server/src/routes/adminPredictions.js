@@ -295,16 +295,26 @@ router.put('/:id', async (req, res) => {
 
 /**
  * POST /api/admin/predictions/:id/mark-answer
- * Mark correct answer and credit winners
+ * POST /api/admin/predictions/:id/reveal-answer  (alias — frontend uses this name)
+ *
+ * Mark correct answer, evaluate all participations, credit winners,
+ * set prediction status to completed.
+ *
+ * Body: { correct_answer: "2-1" }  OR  { correctAnswer: "2-1" }  (both accepted)
+ *
+ * Response: { success: true, data: { total_participants, total_correct, total_paid } }
  */
-router.post('/:id/mark-answer', async (req, res) => {
+async function handleRevealAnswer(req, res) {
   try {
     const { id } = req.params;
-    const { correctAnswer } = req.body;
+    // Accept both naming conventions — frontend sends correct_answer, legacy sends correctAnswer
+    const correctAnswer = req.body.correct_answer || req.body.correctAnswer;
 
-    if (!correctAnswer) {
-      return res.status(400).json({ success: false, error: 'correctAnswer is required' });
+    if (!correctAnswer || String(correctAnswer).trim() === '') {
+      return res.status(400).json({ success: false, error: 'correct_answer is required' });
     }
+
+    const cleanAnswer = String(correctAnswer).trim();
 
     // Fetch prediction
     const { data: prediction, error: predErr } = await supabase
@@ -317,6 +327,10 @@ router.post('/:id/mark-answer', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Prediction not found' });
     }
 
+    if (prediction.status === 'cancelled') {
+      return res.status(409).json({ success: false, error: 'Cannot reveal answer for a cancelled prediction' });
+    }
+
     // Fetch all participations
     const { data: participations } = await supabase
       .from('prediction_participations')
@@ -324,11 +338,16 @@ router.post('/:id/mark-answer', async (req, res) => {
       .eq('prediction_id', id);
 
     const prizePerWinner = parseFloat(prediction.prize_per_winner);
-    let winnersCount = 0;
+    let totalCorrect = 0;
+    let totalPaid = 0;
 
-    // Update each participation
-    for (const part of participations) {
-      const isCorrect = String(part.answer).toLowerCase().trim() === String(correctAnswer).toLowerCase().trim();
+    // Evaluate and credit each participant
+    for (const part of participations || []) {
+      // Skip unsubmitted entries — answer is null
+      if (part.answer === null) continue;
+
+      const isCorrect =
+        String(part.answer).toLowerCase().trim() === cleanAnswer.toLowerCase();
 
       await supabase
         .from('prediction_participations')
@@ -338,19 +357,18 @@ router.post('/:id/mark-answer', async (req, res) => {
         })
         .eq('id', part.id);
 
-      // Credit winners
       if (isCorrect) {
-        winnersCount++;
+        totalCorrect++;
+        totalPaid += prizePerWinner;
+
         const { data: player } = await supabase
           .from('players')
           .select('balance')
           .eq('id', part.player_id)
           .single();
 
-        const newBalance = (player.balance || 0) + prizePerWinner;
-
+        const newBalance = (player?.balance || 0) + prizePerWinner;
         await supabase.from('players').update({ balance: newBalance }).eq('id', part.player_id);
-
         await supabase.from('transactions').insert({
           player_id: part.player_id,
           type: 'prediction_win',
@@ -360,35 +378,39 @@ router.post('/:id/mark-answer', async (req, res) => {
       }
     }
 
-    // Update prediction status
+    // Mark prediction completed
     await supabase
       .from('predictions')
-      .update({
-        correct_answer: correctAnswer,
-        status: 'completed',
-      })
+      .update({ correct_answer: cleanAnswer, status: 'completed' })
       .eq('id', id);
 
     return res.json({
       success: true,
       data: {
+        total_participants: participations?.length || 0,
+        total_correct: totalCorrect,
+        total_paid: totalPaid,
+        // legacy fields — keep so any existing consumers don't break
         message: 'Prediction marked and winners credited',
         prediction: {
           id: prediction.id,
           question: prediction.question,
-          correctAnswer: correctAnswer,
+          correctAnswer: cleanAnswer,
           status: 'completed',
           totalParticipants: participations?.length || 0,
-          winnersCount: winnersCount,
-          totalPrizeDistributed: winnersCount * prizePerWinner,
+          winnersCount: totalCorrect,
+          totalPrizeDistributed: totalPaid,
         },
       },
     });
   } catch (err) {
-    console.error('Mark prediction answer error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to mark prediction answer' });
+    console.error('Reveal answer error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to reveal answer' });
   }
-});
+}
+
+router.post('/:id/mark-answer', handleRevealAnswer);
+router.post('/:id/reveal-answer', handleRevealAnswer);
 
 /**
  * POST /api/admin/predictions/:id/cancel
