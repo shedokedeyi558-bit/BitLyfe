@@ -34,17 +34,22 @@ function shuffle(arr) {
 
 /**
  * Fetch pills by IDs, re-ordered to match the stored question_ids sequence.
- * Reads from the shared `pills` table — same table the admin endpoint writes to.
+ * Uses parallel .eq() queries instead of .in() — the Supabase JS SDK silently
+ * returns empty results for .in('id', uuidArray) on UUID primary key columns.
  */
 async function getPillsByIds(ids) {
   if (!ids || ids.length === 0) return [];
-  const { data } = await supabase
-    .from('pills')
-    .select('id, question, format, options, correct_answer, color, case_sensitive')
-    .in('id', ids);
-  const map = {};
-  for (const p of data || []) map[p.id] = p;
-  return ids.map((id) => map[id]).filter(Boolean);
+  const results = await Promise.all(
+    ids.map((id) =>
+      supabase
+        .from('pills')
+        .select('id, question, format, options, correct_answer, color, case_sensitive')
+        .eq('id', id)
+        .single()
+        .then(({ data }) => data)
+    )
+  );
+  return results.filter(Boolean);
 }
 
 /**

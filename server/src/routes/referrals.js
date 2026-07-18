@@ -266,10 +266,12 @@ router.get('/tickets', auth, async (req, res) => {
       .lte('expires_at', now);
 
     if (stalePill && stalePill.length > 0) {
-      await supabase
-        .from('pill_tickets')
-        .update({ status: 'expired' })
-        .in('id', stalePill.map(t => t.id));
+      // Use parallel .eq() updates — .in('id', uuidArray) silently no-ops for UUID PKs
+      await Promise.all(
+        stalePill.map((t) =>
+          supabase.from('pill_tickets').update({ status: 'expired' }).eq('id', t.id)
+        )
+      );
     }
 
     // ── Lazy-expire stale blitz_tickets ──────────────────────────────────────
@@ -281,10 +283,12 @@ router.get('/tickets', auth, async (req, res) => {
       .lte('expires_at', now);
 
     if (staleBlitz && staleBlitz.length > 0) {
-      await supabase
-        .from('blitz_tickets')
-        .update({ status: 'expired' })
-        .in('id', staleBlitz.map(t => t.id));
+      // Use parallel .eq() updates — .in('id', uuidArray) silently no-ops for UUID PKs
+      await Promise.all(
+        staleBlitz.map((t) =>
+          supabase.from('blitz_tickets').update({ status: 'expired' }).eq('id', t.id)
+        )
+      );
     }
 
     // ── Fetch active pill tickets ─────────────────────────────────────────────

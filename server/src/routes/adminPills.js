@@ -1100,17 +1100,20 @@ router.get('/packs/attempt-stats', async (req, res) => {
     }
 
     // ── 3. Fetch pack metadata for the breakdown labels ───────────────────
-    const { data: packs, error: packsMetaErr } = await supabase
-      .from('pill_packs')
-      .select('id, name, required_correct, question_count')
-      .in('id', targetPackIds);
-
-    if (packsMetaErr) {
-      return res.status(500).json({ success: false, error: 'Failed to fetch pack metadata' });
-    }
+    // Use parallel .eq() queries — .in('id', uuidArray) silently returns empty for UUID PKs
+    const packMetaResults = await Promise.all(
+      targetPackIds.map((pid) =>
+        supabase
+          .from('pill_packs')
+          .select('id, name, required_correct, question_count')
+          .eq('id', pid)
+          .single()
+          .then(({ data }) => data)
+      )
+    );
 
     const packMeta = {};
-    for (const p of packs || []) packMeta[p.id] = p;
+    for (const p of packMetaResults.filter(Boolean)) packMeta[p.id] = p;
 
     // ── 4. Aggregate counts ───────────────────────────────────────────────
     const byPack = {};

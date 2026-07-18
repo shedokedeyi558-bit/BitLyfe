@@ -493,14 +493,21 @@ router.post('/library/copy-to-pack', async (req, res) => {
     if (!pack) return;
 
     // Fetch the requested draft questions (non-deleted only)
-    const { data: drafts, error: fetchErr } = await supabase
-      .from('draft_question_library')
-      .select('question, format, options, correct_answer, case_sensitive, timer_seconds, color')
-      .in('id', question_ids)
-      .is('deleted_at', null);
+    // Use parallel .eq() queries — .in('id', uuidArray) silently returns empty for UUID PKs
+    const draftResults = await Promise.all(
+      question_ids.map((qid) =>
+        supabase
+          .from('draft_question_library')
+          .select('question, format, options, correct_answer, case_sensitive, timer_seconds, color')
+          .eq('id', qid)
+          .is('deleted_at', null)
+          .maybeSingle()
+          .then(({ data }) => data)
+      )
+    );
+    const drafts = draftResults.filter(Boolean);
 
-    if (fetchErr) return res.status(500).json({ success: false, error: 'Failed to fetch library questions' });
-    if (!drafts || drafts.length === 0) {
+    if (drafts.length === 0) {
       return res.status(404).json({ success: false, error: 'No matching non-deleted library questions found' });
     }
 
