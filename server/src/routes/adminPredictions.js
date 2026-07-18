@@ -513,27 +513,55 @@ router.get('/:id/participants', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Prediction not found' });
     }
 
+    // Fetch participations without relying on embedded FK join —
+    // FK join can silently drop rows if the relation isn't resolved correctly.
     const { data: participations, error } = await supabase
       .from('prediction_participations')
-      .select('id, answer, submitted_at, created_at, players(phone, name)')
+      .select('id, player_id, answer, submitted_at, created_at')
       .eq('prediction_id', id)
-      .order('submitted_at', { ascending: true, nullsFirst: false });
+      .order('created_at', { ascending: true });
 
     if (error) {
+      console.error('Fetch participants error:', error);
       return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
     }
 
-    const participants = (participations || []).map((p) => {
-      const phone = p.players?.phone || '';
-      // Mask: keep first 4 and last 2 digits, replace middle with ***
+    if (!participations || participations.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          prediction: { id: prediction.id, question: prediction.question, status: prediction.status },
+          summary: { total: 0, submitted: 0, pending_submission: 0 },
+          participants: [],
+          participations: [],
+        },
+      });
+    }
+
+    // Fetch player details in a separate query — avoids FK resolution issues
+    const playerIds = [...new Set(participations.map((p) => p.player_id))];
+    const { data: players } = await supabase
+      .from('players')
+      .select('id, phone, name')
+      .in('id', playerIds);
+
+    const playerMap = {};
+    for (const pl of players || []) {
+      playerMap[pl.id] = pl;
+    }
+
+    const participants = participations.map((p) => {
+      const pl = playerMap[p.player_id] || {};
+      const phone = pl.phone || '';
       const masked = phone.length >= 6
         ? `${phone.slice(0, 4)}***${phone.slice(-2)}`
         : '***';
 
       return {
         id: p.id,
+        player_id: p.player_id,
         phone: masked,
-        name: p.players?.name || null,
+        name: pl.name || null,
         answer: p.answer || null,
         submitted_at: p.submitted_at || null,
         has_submitted: p.answer !== null,
@@ -557,7 +585,9 @@ router.get('/:id/participants', async (req, res) => {
           submitted: submittedCount,
           pending_submission: pendingCount,
         },
+        // both keys present — participants for admin UI, participations for any frontend using that key
         participants,
+        participations: participants,
       },
     });
   } catch (err) {
