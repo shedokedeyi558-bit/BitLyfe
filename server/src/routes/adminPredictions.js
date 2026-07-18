@@ -560,17 +560,19 @@ router.get('/:id/participants', async (req, res) => {
       });
     }
 
-    // Fetch player details in a separate query — avoids FK resolution issues
-    const playerIds = [...new Set(participations.map((p) => p.player_id))];
-    const { data: players } = await supabase
-      .from('players')
-      .select('id, phone, name')
-      .in('id', playerIds);
-
+    // Fetch player details individually — avoids Supabase JS SDK UUID array
+    // serialisation quirk where .in('id', uuidArray) can silently return no rows
     const playerMap = {};
-    for (const pl of players || []) {
-      playerMap[pl.id] = pl;
-    }
+    await Promise.all(
+      [...new Set(participations.map((p) => p.player_id))].map(async (pid) => {
+        const { data: pl } = await supabase
+          .from('players')
+          .select('id, phone, name')
+          .eq('id', pid)
+          .single();
+        if (pl) playerMap[pl.id] = pl;
+      })
+    );
 
     const participants = participations.map((p) => {
       const pl = playerMap[p.player_id] || {};
