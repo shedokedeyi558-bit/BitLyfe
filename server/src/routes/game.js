@@ -29,23 +29,7 @@ router.get('/doors', async (req, res) => {
 
     const { data: doors, error } = await supabase
       .from('doors')
-      .select(`
-        id,
-        status,
-        prize,
-        entry_fee,
-        question_id,
-        questions (
-          id,
-          text,
-          format,
-          difficulty,
-          prize,
-          time_limit,
-          options,
-          status
-        )
-      `)
+      .select('id, status, prize, entry_fee, question_id')
       .eq('status', 'active')
       .order('id');
 
@@ -53,24 +37,36 @@ router.get('/doors', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to fetch doors' });
     }
 
-    // Only return doors with active questions
-    const activeDoors = doors
-      .filter((d) => d.questions && d.questions.status === 'active')
-      .map((d) => ({
-        id: d.id,
-        status: d.status,
-        prize: d.questions.prize,
-        entry_fee: d.entry_fee,
+    // Fetch questions individually — embedded join silently returns null for UUID FK columns
+    const activeDoors = [];
+    for (const door of doors || []) {
+      if (!door.question_id) continue;
+
+      const { data: question } = await supabase
+        .from('questions')
+        .select('id, text, format, difficulty, prize, time_limit, options, status')
+        .eq('id', door.question_id)
+        .single();
+
+      // Only include doors whose question exists and is active
+      if (!question || question.status !== 'active') continue;
+
+      activeDoors.push({
+        id: door.id,
+        status: door.status,
+        prize: question.prize,
+        entry_fee: door.entry_fee,
         question: {
-          id: d.questions.id,
-          text: d.questions.text,
-          format: d.questions.format,
-          difficulty: d.questions.difficulty,
-          prize: d.questions.prize,
-          time_limit: d.questions.time_limit,
-          options: d.questions.options,
+          id: question.id,
+          text: question.text,
+          format: question.format,
+          difficulty: question.difficulty,
+          prize: question.prize,
+          time_limit: question.time_limit,
+          options: question.options,
         },
-      }));
+      });
+    }
 
     return res.json({ success: true, data: activeDoors });
   } catch (err) {

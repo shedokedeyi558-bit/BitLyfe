@@ -427,10 +427,11 @@ router.post('/refund-expired', adminAuth, async (req, res) => {
   try {
     const now = new Date().toISOString();
 
-    // Find predictions that are locked/completed with unsubmitted participations
+    // Find participations with no submitted answer (stuck entries)
+    // Fetch without embedded join — predictions(...) join silently returns null for UUID FK
     const { data: stuckParticipations } = await supabase
       .from('prediction_participations')
-      .select('id, player_id, prediction_id, predictions(entry_fee, question, countdown_end_time, status)')
+      .select('id, player_id, prediction_id')
       .is('answer', null)
       .is('submitted_at', null);
 
@@ -438,10 +439,23 @@ router.post('/refund-expired', adminAuth, async (req, res) => {
       return res.json({ success: true, data: { refunded: 0, message: 'No stuck participations found' } });
     }
 
+    // Fetch the corresponding prediction rows individually
+    const predictionCache = {};
+    await Promise.all(
+      [...new Set(stuckParticipations.map((p) => p.prediction_id))].map(async (pid) => {
+        const { data: pred } = await supabase
+          .from('predictions')
+          .select('id, entry_fee, question, countdown_end_time, status')
+          .eq('id', pid)
+          .single();
+        if (pred) predictionCache[pred.id] = pred;
+      })
+    );
+
     let refundCount = 0;
 
     for (const part of stuckParticipations) {
-      const pred = part.predictions;
+      const pred = predictionCache[part.prediction_id];
       if (!pred) continue;
 
       // Only refund if deadline has passed
