@@ -175,19 +175,8 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
       return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
     }
 
-    // Deduct entry fee — bonus first, real balance for remainder. Transaction recorded inside.
-    let billing;
-    try {
-      billing = await deductEntryFee(player.id, entryFee, {
-        type: 'prediction_enter',
-        description: `Entered prediction: ${prediction.question.substring(0, 50)}...`,
-      });
-    } catch (billingErr) {
-      if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
-      throw billingErr;
-    }
-
-    // Check if already participated — idempotency: return existing state, never double-charge
+    // Check if already participated BEFORE charging — idempotency guard must come first
+    // so a duplicate /enter call never double-charges the player.
     const { data: existing } = await supabase
       .from('prediction_participations')
       .select('id, answer, submitted_at')
@@ -217,6 +206,18 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
           newBalance: player.balance, // balance unchanged — already charged
         },
       });
+    }
+
+    // Deduct entry fee — bonus first, real balance for remainder. Transaction recorded inside.
+    let billing;
+    try {
+      billing = await deductEntryFee(player.id, entryFee, {
+        type: 'prediction_enter',
+        description: `Entered prediction: ${prediction.question.substring(0, 50)}...`,
+      });
+    } catch (billingErr) {
+      if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
+      throw billingErr;
     }
 
     // Create participation record (answer is null until /submit is called)
@@ -300,15 +301,21 @@ router.post('/submit', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'predictionId and answer are required' });
     }
 
-    // Fetch participation record
+    // Fetch participation record — use maybeSingle() so a missing row returns null
+    // instead of a query error, giving the player the correct "not participated" message.
     const { data: participation, error: partErr } = await supabase
       .from('prediction_participations')
       .select('*')
       .eq('prediction_id', predictionId)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
-    if (partErr || !participation) {
+    if (partErr) {
+      console.error('Submit participation lookup error:', partErr);
+      return res.status(500).json({ success: false, error: 'Failed to verify participation' });
+    }
+
+    if (!participation) {
       return res.status(404).json({ success: false, error: 'Not participated in this prediction' });
     }
 
@@ -318,13 +325,18 @@ router.post('/submit', auth, async (req, res) => {
     }
 
     // Update participation with answer
-    await supabase
+    const { error: updateErr } = await supabase
       .from('prediction_participations')
       .update({
         answer: String(answer),
         submitted_at: new Date().toISOString(),
       })
       .eq('id', participation.id);
+
+    if (updateErr) {
+      console.error('Submit answer write error:', updateErr);
+      return res.status(500).json({ success: false, error: 'Failed to save your answer. Please try again.' });
+    }
 
     return res.json({
       success: true,
