@@ -350,7 +350,12 @@ router.get('/verify', auth, async (req, res) => {
 
 /**
  * GET /api/wallet/transactions
- * Return player's transaction history.
+ * Return player's transaction history, including pending/processing withdrawal state.
+ *
+ * withdrawal_pending rows are included — these represent the held balance while a
+ * withdrawal is awaiting admin action (including transfer_failed state).
+ * Frontend should render withdrawal_pending as "Processing" not "Completed",
+ * so the player can see their money is accounted for.
  */
 router.get('/transactions', auth, async (req, res) => {
   try {
@@ -368,13 +373,47 @@ router.get('/transactions', auth, async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to fetch transactions' });
     }
 
+    // Check if any withdrawal_pending transactions have a corresponding transfer_failed request
+    // so the frontend can display "Transfer issue — under review" instead of just "Processing"
+    const pendingTxns = (data || []).filter((t) => t.type === 'withdrawal_pending');
+    let transferFailedIds = new Set();
+
+    if (pendingTxns.length > 0) {
+      const { data: failedWithdrawals } = await supabase
+        .from('withdrawal_requests')
+        .select('id')
+        .eq('player_id', req.player.id)
+        .eq('status', 'transfer_failed');
+
+      if (failedWithdrawals) {
+        // We can't directly join withdrawal_requests to transactions without a reference,
+        // so flag ALL pending transactions if ANY withdrawal is transfer_failed.
+        // This is conservative — if the player has any transfer_failed withdrawal, show the warning.
+        if (failedWithdrawals.length > 0) {
+          transferFailedIds = new Set(failedWithdrawals.map((w) => w.id));
+        }
+      }
+    }
+
+    const enriched = (data || []).map((t) => ({
+      ...t,
+      // Provide a display_status hint for the frontend
+      display_status:
+        t.type === 'withdrawal_pending' && transferFailedIds.size > 0
+          ? 'transfer_issue'
+          : t.type === 'withdrawal_pending'
+          ? 'processing'
+          : 'completed',
+    }));
+
     return res.json({
       success: true,
       data: {
-        transactions: data,
+        transactions: enriched,
         total: count,
         page: Number(page),
         limit: Number(limit),
+        has_transfer_failed_withdrawal: transferFailedIds.size > 0,
       },
     });
   } catch (err) {

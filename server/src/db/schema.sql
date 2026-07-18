@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
   bank_code TEXT,                    -- Paystack numeric bank code (e.g. "058") — required for transfers
   recipient_code TEXT,               -- Paystack transfer recipient code — stored to avoid duplicate recipients
   transfer_reference TEXT,           -- idempotency key for the Paystack transfer
+  transfer_failed_reason TEXT,       -- Paystack error message when status = transfer_failed
+  -- status values:
+  --   pending          — submitted by player, awaiting admin action
+  --   transfer_failed  — admin approved but Paystack transfer failed; use retry-transfer or reject
+  --   approved         — Paystack transfer succeeded; money is in transit
+  --   rejected         — rejected by admin; balance refunded to player
   status TEXT DEFAULT 'pending',
   reject_reason TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
