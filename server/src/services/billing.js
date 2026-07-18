@@ -61,4 +61,42 @@ async function deductEntryFee(playerId, entryFee, txnFields) {
   return { newBalance, newBonusBalance, bonusUsed, realUsed };
 }
 
-module.exports = { deductEntryFee };
+/**
+ * Refund an entry fee back to a player's real balance.
+ * Used as a compensating transaction when a post-charge write fails.
+ *
+ * Always refunds to real balance (not bonus) — bonus was drawn first on entry
+ * but a partial-bonus refund would require knowing the exact split, which
+ * isn't available in the failure path. Refunding to real balance is safe
+ * and never leaves the player worse off.
+ *
+ * @param {string} playerId
+ * @param {number} entryFee
+ * @param {string} predictionId  - used in the transaction description for traceability
+ */
+async function refundEntryFee(playerId, entryFee, predictionId) {
+  // Fetch fresh balance before crediting
+  const { data: player, error } = await supabase
+    .from('players')
+    .select('balance')
+    .eq('id', playerId)
+    .single();
+
+  if (error || !player) throw new Error('Player not found during refund');
+
+  const newBalance = Number(player.balance || 0) + entryFee;
+
+  await supabase
+    .from('players')
+    .update({ balance: newBalance })
+    .eq('id', playerId);
+
+  await supabase.from('transactions').insert({
+    player_id: playerId,
+    type: 'prediction_refund',
+    amount: entryFee,
+    description: `Auto-refund: participation write failed for prediction ${predictionId}`,
+  });
+}
+
+module.exports = { deductEntryFee, refundEntryFee };

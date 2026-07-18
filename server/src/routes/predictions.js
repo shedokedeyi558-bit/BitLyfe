@@ -5,7 +5,7 @@ const auth = require('../middleware/auth');
 const adminAuth = require('../middleware/adminAuth');
 const idempotency = require('../middleware/idempotency');
 const { checkReferralCompletion } = require('./referrals');
-const { deductEntryFee } = require('../services/billing');
+const { deductEntryFee, refundEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
@@ -220,12 +220,27 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
     }
 
     // Create participation record (answer is null until /submit is called)
-    await supabase.from('prediction_participations').insert({
+    const { error: insertErr } = await supabase.from('prediction_participations').insert({
       prediction_id: predictionId,
       player_id: player.id,
       answer: null,
       submitted_at: null,
     });
+
+    if (insertErr) {
+      // Participation write failed — refund the player so they are not charged for nothing
+      console.error('Participation insert failed, issuing refund:', insertErr);
+      try {
+        await refundEntryFee(player.id, entryFee, predictionId);
+      } catch (refundErr) {
+        // Refund itself failed — log loudly so ops can intervene manually
+        console.error('CRITICAL: refund failed after participation insert error. Player:', player.id, 'Amount:', entryFee, 'Prediction:', predictionId, refundErr);
+      }
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to record your entry. Your payment has been refunded.',
+      });
+    }
 
     // Increment current_participants
     const newParticipantCount = prediction.current_participants + 1;

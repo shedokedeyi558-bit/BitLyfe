@@ -88,6 +88,63 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * GET /api/admin/predictions/stats
+ * Prediction statistics and analytics
+ */
+router.get('/stats', async (req, res) => {
+  try {
+    // Use count-only queries — never fetch full rows just to count them
+    const [totalRes, activeRes, lockedRes, completedRes, cancelledRes, participationsRes, revenueRes] =
+      await Promise.all([
+        supabase.from('predictions').select('id', { count: 'exact', head: true }),
+        supabase.from('predictions').select('id', { count: 'exact', head: true }).eq('status', 'active'),
+        supabase.from('predictions').select('id', { count: 'exact', head: true }).eq('status', 'locked'),
+        supabase.from('predictions').select('id', { count: 'exact', head: true }).eq('status', 'completed'),
+        supabase.from('predictions').select('id', { count: 'exact', head: true }).eq('status', 'cancelled'),
+        supabase.from('prediction_participations').select('id', { count: 'exact', head: true }),
+        // Revenue and prize need actual values — keep these as data fetches but select only what's needed
+        supabase.from('predictions').select('entry_fee, current_participants').neq('status', 'cancelled'),
+      ]);
+
+    const { data: revRows } = revenueRes;
+
+    const totalRevenueGenerated = (revRows || []).reduce(
+      (sum, p) => sum + parseFloat(p.entry_fee) * (p.current_participants || 0),
+      0,
+    );
+
+    // Prize distributed: sum amount_won from participations where it's > 0
+    const { data: wonRows } = await supabase
+      .from('prediction_participations')
+      .select('amount_won')
+      .gt('amount_won', 0);
+
+    const totalPrizeDistributed = (wonRows || []).reduce(
+      (sum, p) => sum + (parseFloat(p.amount_won) || 0),
+      0,
+    );
+
+    const stats = {
+      total:                totalRes.count      || 0,
+      active:               activeRes.count     || 0,
+      locked:               lockedRes.count     || 0,
+      completed:            completedRes.count  || 0,
+      cancelled:            cancelledRes.count  || 0,
+      // live = active + locked: events still in play (useful for dashboard "at a glance")
+      live:                 (activeRes.count || 0) + (lockedRes.count || 0),
+      totalParticipations:  participationsRes.count || 0,
+      totalRevenueGenerated,
+      totalPrizeDistributed,
+    };
+
+    return res.json({ success: true, data: { stats } });
+  } catch (err) {
+    console.error('Predictions stats error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch prediction stats' });
+  }
+});
+
+/**
  * GET /api/admin/predictions/:id
  * Single prediction detail — same shape as entries in GET /api/admin/games,
  * plus participants_summary: { total, submitted, pending_submission }
@@ -471,33 +528,6 @@ router.get('/:id/participants', async (req, res) => {
   } catch (err) {
     console.error('Get prediction participants error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
-  }
-});
-
-/**
- * GET /api/admin/predictions/stats
- * Prediction statistics and analytics
- */
-router.get('/stats', async (req, res) => {
-  try {
-    const { data: allPredictions } = await supabase.from('predictions').select('*');
-    const { data: allParticipations } = await supabase.from('prediction_participations').select('*');
-
-    const stats = {
-      total: allPredictions?.length || 0,
-      active: allPredictions?.filter((p) => p.status === 'active').length || 0,
-      locked: allPredictions?.filter((p) => p.status === 'locked').length || 0,
-      completed: allPredictions?.filter((p) => p.status === 'completed').length || 0,
-      cancelled: allPredictions?.filter((p) => p.status === 'cancelled').length || 0,
-      totalParticipations: allParticipations?.length || 0,
-      totalRevenueGenerated: allPredictions?.reduce((sum, p) => sum + (parseFloat(p.entry_fee) * p.current_participants || 0), 0) || 0,
-      totalPrizeDistributed: allParticipations?.reduce((sum, p) => sum + (parseFloat(p.amount_won) || 0), 0) || 0,
-    };
-
-    return res.json({ success: true, data: { stats } });
-  } catch (err) {
-    console.error('Predictions stats error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to fetch prediction stats' });
   }
 });
 
