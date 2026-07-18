@@ -490,14 +490,32 @@ router.get('/:id/participations', async (req, res) => {
     const { page = 1, limit = 20 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    const { data, error, count } = await supabase
+    const { data: parts, error, count } = await supabase
       .from('prediction_participations')
-      .select('*, players(phone, name)', { count: 'exact' })
+      .select('*', { count: 'exact' })
       .eq('prediction_id', id)
       .order('created_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1);
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch participations' });
+
+    // Two-step player lookup — FK join silently drops rows for UUID columns in Supabase JS SDK
+    const playerMap = {};
+    await Promise.all(
+      [...new Set((parts || []).map((p) => p.player_id))].map(async (pid) => {
+        const { data: pl } = await supabase
+          .from('players')
+          .select('id, phone, name')
+          .eq('id', pid)
+          .single();
+        if (pl) playerMap[pl.id] = pl;
+      })
+    );
+
+    const data = (parts || []).map((p) => ({
+      ...p,
+      players: playerMap[p.player_id] ? { phone: playerMap[p.player_id].phone, name: playerMap[p.player_id].name } : null,
+    }));
 
     return res.json({
       success: true,

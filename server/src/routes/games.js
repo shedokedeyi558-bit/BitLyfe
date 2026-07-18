@@ -885,13 +885,9 @@ router.get('/:id/participants', adminAuth, async (req, res) => {
     const { data: prediction } = await supabase.from('predictions').select('id').eq('id', id).single();
 
     if (prediction) {
-      const { data, error, count } = await supabase
+      const { data: parts, error, count } = await supabase
         .from('prediction_participations')
-        .select(
-          `id, player_id, answer, is_correct, amount_won, submitted_at, created_at,
-           players (id, phone, name, email)`,
-          { count: 'exact' }
-        )
+        .select('id, player_id, answer, is_correct, amount_won, submitted_at, created_at', { count: 'exact' })
         .eq('prediction_id', id)
         .order('created_at', { ascending: false })
         .range(offset, offset + Number(limit) - 1);
@@ -900,17 +896,33 @@ router.get('/:id/participants', adminAuth, async (req, res) => {
         return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
       }
 
-      const participations = (data || []).map((p) => ({
-        id: p.id,
-        player_id: p.player_id,
-        player_phone: p.players?.phone || null,
-        player_name: p.players?.name || null,
-        answer: p.answer,
-        is_correct: p.is_correct,
-        amount_won: parseFloat(p.amount_won) || 0,
-        participated_at: p.created_at,
-        submitted_at: p.submitted_at,
-      }));
+      // Two-step player lookup — FK join silently drops rows for UUID columns in Supabase JS SDK
+      const playerMap = {};
+      await Promise.all(
+        [...new Set((parts || []).map((p) => p.player_id))].map(async (pid) => {
+          const { data: pl } = await supabase
+            .from('players')
+            .select('id, phone, name')
+            .eq('id', pid)
+            .single();
+          if (pl) playerMap[pl.id] = pl;
+        })
+      );
+
+      const participations = (parts || []).map((p) => {
+        const pl = playerMap[p.player_id] || {};
+        return {
+          id: p.id,
+          player_id: p.player_id,
+          player_phone: pl.phone || null,
+          player_name: pl.name || null,
+          answer: p.answer,
+          is_correct: p.is_correct,
+          amount_won: parseFloat(p.amount_won) || 0,
+          participated_at: p.created_at,
+          submitted_at: p.submitted_at,
+        };
+      });
 
       return res.json({
         success: true,
