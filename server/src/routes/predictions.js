@@ -503,50 +503,51 @@ router.get('/my-predictions', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Query param status must be "active" or "settled"' });
     }
 
-    // Fetch all participations for this player, joining the prediction
+    // Fetch all participations for this player — no embedded join,
+    // Supabase JS SDK FK joins silently return null for UUID FK columns.
     const { data: participations, error } = await supabase
       .from('prediction_participations')
-      .select(`
-        id,
-        answer,
-        submitted_at,
-        is_correct,
-        amount_won,
-        created_at,
-        predictions (
-          id,
-          question,
-          category,
-          entry_fee,
-          prize_per_winner,
-          countdown_end_time,
-          status,
-          correct_answer,
-          updated_at
-        )
-      `)
+      .select('id, prediction_id, answer, submitted_at, is_correct, amount_won, created_at')
       .eq('player_id', player.id);
 
     if (error) {
       return res.status(500).json({ success: false, error: 'Failed to fetch predictions' });
     }
 
+    if (!participations || participations.length === 0) {
+      return res.json({ success: true, data: { predictions: [] } });
+    }
+
+    // Fetch the corresponding prediction rows individually — avoids FK join issue
+    const predictionMap = {};
+    await Promise.all(
+      [...new Set(participations.map((p) => p.prediction_id))].map(async (pid) => {
+        const { data: pred } = await supabase
+          .from('predictions')
+          .select('id, question, category, entry_fee, prize_per_winner, countdown_end_time, status, correct_answer, updated_at')
+          .eq('id', pid)
+          .single();
+        if (pred) predictionMap[pred.id] = pred;
+      })
+    );
+
     let predictions;
 
     if (status === 'active') {
       // Active: prediction hasn't been revealed yet (no correct_answer, or status not completed)
       const active = (participations || []).filter((p) => {
-        const pred = p.predictions;
+        const pred = predictionMap[p.prediction_id];
         return pred && (pred.status !== 'completed' || !pred.correct_answer);
       });
 
       // Order by soonest countdown_end first
       active.sort((a, b) =>
-        new Date(a.predictions.countdown_end_time) - new Date(b.predictions.countdown_end_time)
+        new Date(predictionMap[a.prediction_id].countdown_end_time) -
+        new Date(predictionMap[b.prediction_id].countdown_end_time)
       );
 
       predictions = active.map((p) => {
-        const pred = p.predictions;
+        const pred = predictionMap[p.prediction_id];
         const hasSubmitted = p.answer !== null;
         const state = hasSubmitted ? 'submitted_waiting' : 'entered_not_submitted';
 
@@ -566,17 +567,18 @@ router.get('/my-predictions', auth, async (req, res) => {
     } else {
       // Settled: prediction completed with correct_answer revealed
       const settled = (participations || []).filter((p) => {
-        const pred = p.predictions;
+        const pred = predictionMap[p.prediction_id];
         return pred && pred.status === 'completed' && pred.correct_answer;
       });
 
       // Order by most recently completed (use updated_at as proxy for completed_at)
       settled.sort((a, b) =>
-        new Date(b.predictions.updated_at) - new Date(a.predictions.updated_at)
+        new Date(predictionMap[b.prediction_id].updated_at) -
+        new Date(predictionMap[a.prediction_id].updated_at)
       );
 
       predictions = settled.map((p) => {
-        const pred = p.predictions;
+        const pred = predictionMap[p.prediction_id];
 
         return {
           id: pred.id,
@@ -587,6 +589,7 @@ router.get('/my-predictions', auth, async (req, res) => {
           won: p.is_correct === true,
           amount_won: parseFloat(p.amount_won || 0),
           completed_at: pred.updated_at,
+          participated_at: p.created_at || null,
         };
       });
     }
