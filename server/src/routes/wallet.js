@@ -549,6 +549,12 @@ router.post('/withdraw', auth, async (req, res) => {
       .update({ balance: freshPlayer.balance - amountNum })
       .eq('id', player.id);
 
+    // Generate transfer_reference NOW — at creation time, not at approve time.
+    // This is the idempotency key for the Paystack transfer. Generating it here
+    // means the reference is fixed for the lifetime of this withdrawal request —
+    // no matter how many times an admin clicks Approve, the same reference is used.
+    const transferReference = `wdl_${uuidv4()}`;
+
     // Create withdrawal request
     const { data: withdrawal, error: wErr } = await supabase
       .from('withdrawal_requests')
@@ -560,6 +566,7 @@ router.post('/withdraw', auth, async (req, res) => {
         account_number: accountNumber,
         bank_code: bankCode,
         bank_name: bankName || null,   // display only — not used for transfers
+        transfer_reference: transferReference,  // pre-assigned, never changes
         status: 'pending',
       })
       .select()

@@ -105,14 +105,16 @@ router.get('/', async (req, res) => {
     // Build per-status summary counts (only when no filter is applied, cheap parallel count queries)
     let summary = null;
     if (!status) {
-      const [pendingRes, failedRes, approvedRes, rejectedRes] = await Promise.all([
+      const [pendingRes, failedRes, approvedRes, rejectedRes, processingRes] = await Promise.all([
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'transfer_failed'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
+        supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'processing'),
       ]);
       summary = {
         pending: pendingRes.count || 0,
+        processing: processingRes.count || 0,
         transfer_failed: failedRes.count || 0,
         approved: approvedRes.count || 0,
         rejected: rejectedRes.count || 0,
@@ -141,33 +143,85 @@ router.get('/', async (req, res) => {
  * PUT /api/admin/withdrawals/:id/approve
  * Approve a pending withdrawal and initiate Paystack transfer.
  *
- * Only marks status as 'approved' if Paystack actually succeeds.
- * On Paystack failure, status becomes 'transfer_failed' with the error reason stored —
- * clearly distinct from 'approved' and visible in the admin panel.
- * Balance stays deducted in both cases — no double-refund risk.
+ * Idempotency and concurrency guarantees:
+ *
+ * 1. transfer_reference is generated at withdrawal creation time (wallet.js /withdraw),
+ *    never here — so every call to approve uses the same fixed reference.
+ *
+ * 2. Atomic mutex via conditional UPDATE: the status is flipped from 'pending'
+ *    to 'processing' in a single UPDATE WHERE status='pending'. If two concurrent
+ *    requests both read 'pending', only one UPDATE succeeds (the second sees
+ *    rowCount=0 and gets 409). No SELECT-then-UPDATE race.
+ *
+ * 3. Idempotent replay: before calling Paystack, check whether a 'withdrawal'
+ *    transaction with this reference already exists. If yes, a previous call
+ *    succeeded — return the existing result without firing a second transfer.
+ *
+ * 4. Only marks status 'approved' if Paystack actually succeeds.
+ *    On failure, status is set to 'transfer_failed' (not 'approved').
  */
 router.put('/:id/approve', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: withdrawal, error: fetchErr } = await supabase
+    // ── Step 1: atomic status flip pending → processing ─────────────────────
+    // This is the DB-level concurrency guard. The UPDATE only matches if the row
+    // is still 'pending' — whichever of two concurrent requests wins the race,
+    // the other will see rowCount=0 from its own UPDATE and bail out.
+    const { data: locked, error: lockErr } = await supabase
       .from('withdrawal_requests')
-      .select('*')
+      .update({ status: 'processing' })
       .eq('id', id)
-      .single();
+      .eq('status', 'pending')   // ← atomic condition — only one request wins
+      .select('*')
+      .maybeSingle();
 
-    if (fetchErr || !withdrawal) {
-      return res.status(404).json({ success: false, error: 'Withdrawal request not found' });
+    if (lockErr) {
+      console.error('Approve lock error:', lockErr);
+      return res.status(500).json({ success: false, error: 'Failed to lock withdrawal for processing' });
     }
 
-    if (withdrawal.status !== 'pending') {
+    if (!locked) {
+      // Either the row doesn't exist, or status isn't 'pending' (already processing/approved/failed/rejected)
+      // Fetch current state to give a clear error message
+      const { data: current } = await supabase
+        .from('withdrawal_requests')
+        .select('id, status, transfer_reference')
+        .eq('id', id)
+        .maybeSingle();
+
+      if (!current) {
+        return res.status(404).json({ success: false, error: 'Withdrawal request not found' });
+      }
+
+      if (current.status === 'processing') {
+        return res.status(409).json({
+          success: false,
+          code: 'CONCURRENT_APPROVE',
+          error: 'Another approve request is already in progress for this withdrawal. Please wait and check the result.',
+        });
+      }
+
+      if (current.status === 'approved') {
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_APPROVED',
+          error: 'This withdrawal has already been approved.',
+        });
+      }
+
       return res.status(400).json({
         success: false,
-        error: `Cannot approve a withdrawal with status: ${withdrawal.status}. Use the retry-transfer endpoint for transfer_failed withdrawals.`,
+        error: `Cannot approve a withdrawal with status: ${current.status}. Use retry-transfer for transfer_failed withdrawals.`,
       });
     }
 
+    const withdrawal = locked;
+
+    // ── Step 2: validate required fields ─────────────────────────────────────
     if (!withdrawal.bank_code) {
+      // Revert to pending so the admin can fix and retry
+      await supabase.from('withdrawal_requests').update({ status: 'pending' }).eq('id', id);
       return res.status(422).json({
         success: false,
         code: 'MISSING_BANK_CODE',
@@ -175,34 +229,50 @@ router.put('/:id/approve', async (req, res) => {
       });
     }
 
-    // Idempotency: a stored transfer_reference means this approve already ran.
-    // Block re-entry — admin should use retry-transfer if the transfer actually failed.
-    if (withdrawal.transfer_reference) {
-      return res.status(409).json({
-        success: false,
-        code: 'ALREADY_PROCESSED',
-        error: `Transfer reference already assigned (${withdrawal.transfer_reference}). If the transfer failed, use PUT /:id/retry-transfer.`,
+    if (!withdrawal.transfer_reference) {
+      // Pre-2024 row created before the reference-at-creation change — generate one now
+      // (should not happen for any new withdrawal)
+      const newRef = `wdl_${uuidv4()}`;
+      await supabase.from('withdrawal_requests').update({ transfer_reference: newRef }).eq('id', id);
+      withdrawal.transfer_reference = newRef;
+    }
+
+    // ── Step 3: idempotent replay check ──────────────────────────────────────
+    // If a 'withdrawal' transaction already exists with this reference, a previous
+    // approve call already succeeded and credited the player. Return the existing
+    // result rather than calling Paystack again.
+    const { data: existingTxn } = await supabase
+      .from('transactions')
+      .select('id, amount, created_at')
+      .eq('reference', withdrawal.transfer_reference)
+      .eq('type', 'withdrawal')
+      .maybeSingle();
+
+    if (existingTxn) {
+      // Already paid — flip status to approved (in case it was stuck in 'processing')
+      const { data: alreadyApproved } = await supabase
+        .from('withdrawal_requests')
+        .update({ status: 'approved' })
+        .eq('id', id)
+        .select()
+        .single();
+
+      return res.json({
+        success: true,
+        idempotent_replay: true,
+        data: {
+          withdrawal: alreadyApproved,
+          transferReference: withdrawal.transfer_reference,
+          message: 'Withdrawal was already approved — idempotent replay. No new transfer was initiated.',
+        },
       });
     }
 
-    const transferReference = `wdl_${uuidv4()}`;
-
-    // Write the reference BEFORE calling Paystack — crash safety.
-    // If the process dies mid-call, the reference is stored and a subsequent
-    // approve will be blocked, forcing the admin to use retry-transfer.
-    await supabase
-      .from('withdrawal_requests')
-      .update({ transfer_reference: transferReference })
-      .eq('id', id);
-
+    // ── Step 4: attempt Paystack transfer ────────────────────────────────────
     let paystackResult;
     try {
-      paystackResult = await attemptPaystackTransfer({
-        ...withdrawal,
-        transfer_reference: transferReference,
-      });
+      paystackResult = await attemptPaystackTransfer(withdrawal);
     } catch (unexpectedErr) {
-      // Network/unexpected error — mark transfer_failed, do not approve
       console.error('Unexpected Paystack error during approve:', unexpectedErr.message);
       await supabase
         .from('withdrawal_requests')
@@ -220,7 +290,6 @@ router.put('/:id/approve', async (req, res) => {
     }
 
     if (!paystackResult.success) {
-      // Paystack returned a failure — mark transfer_failed, NOT approved
       await supabase
         .from('withdrawal_requests')
         .update({
@@ -229,10 +298,9 @@ router.put('/:id/approve', async (req, res) => {
         })
         .eq('id', id);
 
-      // Notify player their withdrawal hit a problem (not rejected, but delayed)
       await createNotification(
         withdrawal.player_id,
-        'withdrawal_rejected',  // closest available type — frontend shows "check your withdrawal"
+        'withdrawal_rejected',
         'Withdrawal transfer issue',
         `Your withdrawal of ₦${withdrawal.amount.toLocaleString()} encountered a transfer issue. Our team is resolving it.`
       ).catch(() => {});
@@ -246,7 +314,7 @@ router.put('/:id/approve', async (req, res) => {
       });
     }
 
-    // ── Paystack succeeded — mark approved ───────────────────────────────────
+    // ── Step 5: Paystack succeeded — mark approved ───────────────────────────
     const { data: updated, error: updateErr } = await supabase
       .from('withdrawal_requests')
       .update({ status: 'approved' })
@@ -255,8 +323,6 @@ router.put('/:id/approve', async (req, res) => {
       .single();
 
     if (updateErr) {
-      // Transfer happened but DB update failed — log loudly, don't return error to admin
-      // (the money has moved; marking it failed would confuse the state)
       console.error('CRITICAL: Paystack transfer succeeded but status update failed. Withdrawal:', id);
     }
 
@@ -265,7 +331,7 @@ router.put('/:id/approve', async (req, res) => {
       type: 'withdrawal',
       amount: -withdrawal.amount,
       description: `Withdrawal of ₦${withdrawal.amount} approved`,
-      reference: transferReference,
+      reference: withdrawal.transfer_reference,
     });
 
     await createNotification(
@@ -279,13 +345,20 @@ router.put('/:id/approve', async (req, res) => {
       success: true,
       data: {
         withdrawal: updated,
-        transferReference,
+        transferReference: withdrawal.transfer_reference,
         paystackTransferCode: paystackResult.paystackTransferCode,
         message: 'Withdrawal approved and transfer initiated',
       },
     });
   } catch (err) {
     console.error('Approve withdrawal error:', err);
+    // On unexpected error, revert processing status back to pending so admin can retry
+    await supabase
+      .from('withdrawal_requests')
+      .update({ status: 'pending' })
+      .eq('id', id)
+      .eq('status', 'processing')
+      .catch(() => {});
     return res.status(500).json({ success: false, error: 'Failed to approve withdrawal' });
   }
 });
@@ -437,10 +510,13 @@ router.put('/:id/reject', async (req, res) => {
     }
 
     // Allow rejection of both pending and transfer_failed statuses
+    // Do NOT allow rejecting 'processing' — an approve is currently in flight
     if (!['pending', 'transfer_failed'].includes(withdrawal.status)) {
       return res.status(400).json({
         success: false,
-        error: `Cannot reject a withdrawal with status: ${withdrawal.status}`,
+        error: withdrawal.status === 'processing'
+          ? 'This withdrawal is currently being processed. Wait for the approve to complete before rejecting.'
+          : `Cannot reject a withdrawal with status: ${withdrawal.status}`,
       });
     }
 
