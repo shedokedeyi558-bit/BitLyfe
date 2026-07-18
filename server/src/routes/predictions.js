@@ -560,6 +560,7 @@ router.get('/my-predictions', auth, async (req, res) => {
           state,
           countdown_end: pred.countdown_end_time,
           needs_submission: !hasSubmitted,
+          participated_at: p.created_at || null,
         };
       });
     } else {
