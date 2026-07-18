@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const { checkAnswer, maskPhone, sanitizeQuestion } = require('../services/gameLogic');
+const { createNotification } = require('./notifications');
 
 const router = express.Router();
 
@@ -297,6 +298,14 @@ router.post('/submit', auth, async (req, res) => {
         amount: prize,
         description: `Won door ${session.door_id}`,
       });
+
+      // Notify player of win
+      await createNotification(
+        player.id,
+        'win',
+        'You won! 🎉',
+        `Correct answer! ₦${prize.toLocaleString()} has been credited to your wallet.`
+      ).catch(() => {});
 
       return res.json({
         success: true,

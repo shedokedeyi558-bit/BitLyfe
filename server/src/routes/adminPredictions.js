@@ -1,6 +1,7 @@
 const express = require('express');
 const supabase = require('../db/supabase');
 const adminAuth = require('../middleware/adminAuth');
+const { createNotification } = require('./notifications');
 
 const router = express.Router();
 
@@ -375,8 +376,23 @@ async function handleRevealAnswer(req, res) {
           amount: prizePerWinner,
           description: `Won prediction: ${prediction.question.substring(0, 50)}...`,
         });
+
+        // Notify winner
+        await createNotification(
+          part.player_id,
+          'prediction_result',
+          'Prediction correct! 🎉',
+          `You correctly predicted "${prediction.question.substring(0, 60)}..." — ₦${prizePerWinner.toLocaleString()} credited to your wallet.`
+        ).catch(() => {});
+      } else {
+        // Notify loser — they need to know the result even if they didn't win
+        await createNotification(
+          part.player_id,
+          'prediction_result',
+          'Prediction result',
+          `The result for "${prediction.question.substring(0, 60)}..." has been revealed. The correct answer was: ${cleanAnswer}.`
+        ).catch(() => {});
       }
-    }
 
     // Mark prediction completed
     await supabase

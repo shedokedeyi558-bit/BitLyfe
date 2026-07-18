@@ -428,7 +428,7 @@ CREATE INDEX IF NOT EXISTS idx_pills_category ON pills(category);
 CREATE TABLE IF NOT EXISTS notifications (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   player_id UUID REFERENCES players(id) ON DELETE CASCADE,
-  type TEXT CHECK (type IN ('win', 'loss', 'new_event', 'withdrawal_approved', 'withdrawal_rejected', 'blitz_starting', 'prediction_result')) NOT NULL,
+  type TEXT CHECK (type IN ('win', 'loss', 'new_event', 'withdrawal_approved', 'withdrawal_rejected', 'blitz_starting', 'prediction_result', 'announcement')) NOT NULL,
   title TEXT NOT NULL,
   message TEXT NOT NULL,
   read BOOLEAN DEFAULT false,
