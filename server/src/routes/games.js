@@ -47,8 +47,13 @@ function formatPill(pill, { includeAnswer = true } = {}) {
  *   correct_answer set               → "completed"
  *   correct_answer null + countdown passed → "locked"
  *   otherwise                        → "active"
+ *
+ * @param {object} prediction - raw DB row
+ * @param {object} [liveCounts] - { total, submitted } from a live COUNT query.
+ *   When provided, slots_filled and participants_summary use the live count.
+ *   When absent, falls back to current_participants (the stored counter).
  */
-function formatPrediction(prediction) {
+function formatPrediction(prediction, liveCounts = null) {
   const now = Date.now();
   const countdownEnd = new Date(prediction.countdown_end_time).getTime();
 
@@ -60,6 +65,9 @@ function formatPrediction(prediction) {
   } else {
     display_status = 'active';
   }
+
+  const totalParticipants = liveCounts ? liveCounts.total : prediction.current_participants;
+  const submittedParticipants = liveCounts ? liveCounts.submitted : null;
 
   return {
     id: prediction.id,
@@ -73,7 +81,7 @@ function formatPrediction(prediction) {
     fee: Number(prediction.entry_fee),
     prize_per_winner: Number(prediction.prize_per_winner),
     max_slots: prediction.max_participants,
-    slots_filled: prediction.current_participants,
+    slots_filled: totalParticipants,   // live count when available
     countdown_end: prediction.countdown_end_time,
     countdown_remaining_seconds: Math.max(0, Math.floor((countdownEnd - now) / 1000)),
     answer_revealed_at: prediction.answer_revealed_at || null,
@@ -81,8 +89,17 @@ function formatPrediction(prediction) {
     event_date: prediction.event_date || null,
     created_at: prediction.created_at,
     stats: {
-      total_players: prediction.current_participants,
-      revenue: prediction.current_participants * Number(prediction.entry_fee),
+      total_players: totalParticipants,
+      revenue: totalParticipants * Number(prediction.entry_fee),
+    },
+    // participants_summary mirrors the detail endpoint shape so the list and
+    // detail pages read the same field names
+    participants_summary: {
+      total: totalParticipants,
+      submitted: submittedParticipants,            // null when not fetched (list without live query)
+      pending_submission: submittedParticipants !== null
+        ? totalParticipants - submittedParticipants
+        : null,
     },
   };
 }
@@ -172,7 +189,35 @@ router.get('/', adminAuth, async (req, res) => {
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (predictions) games = games.concat(predictions.map(formatPrediction));
+      if (predictions && predictions.length > 0) {
+        // Fetch live participation counts for all predictions in one query.
+        // This avoids N+1 and avoids trusting the stale current_participants counter.
+        const predictionIds = predictions.map((p) => p.id);
+
+        // Supabase doesn't support GROUP BY directly — fetch all participation rows
+        // (only id + prediction_id + answer) and aggregate in JS.
+        // For typical scale (hundreds of predictions, thousands of entries) this is fine.
+        const { data: allParts } = await supabase
+          .from('prediction_participations')
+          .select('prediction_id, answer')
+          .in('prediction_id', predictionIds);
+
+        // Build a map: predictionId → { total, submitted }
+        const countsMap = {};
+        for (const part of allParts || []) {
+          if (!countsMap[part.prediction_id]) {
+            countsMap[part.prediction_id] = { total: 0, submitted: 0 };
+          }
+          countsMap[part.prediction_id].total += 1;
+          if (part.answer !== null) {
+            countsMap[part.prediction_id].submitted += 1;
+          }
+        }
+
+        games = games.concat(
+          predictions.map((p) => formatPrediction(p, countsMap[p.id] || { total: 0, submitted: 0 }))
+        );
+      }
     }
 
     // Fetch doors
@@ -456,7 +501,16 @@ router.get('/:id', adminAuth, async (req, res) => {
     // Try prediction (UUID)
     const { data: prediction } = await supabase.from('predictions').select('*').eq('id', id).single();
     if (prediction) {
-      return res.json({ success: true, data: { game: formatPrediction(prediction) } });
+      // Fetch live counts for this prediction
+      const { data: parts } = await supabase
+        .from('prediction_participations')
+        .select('answer')
+        .eq('prediction_id', id);
+
+      const total = (parts || []).length;
+      const submitted = (parts || []).filter((p) => p.answer !== null).length;
+
+      return res.json({ success: true, data: { game: formatPrediction(prediction, { total, submitted }) } });
     }
 
     // Try challenge (UUID)
