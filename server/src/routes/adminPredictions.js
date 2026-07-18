@@ -393,6 +393,7 @@ async function handleRevealAnswer(req, res) {
           `The result for "${prediction.question.substring(0, 60)}..." has been revealed. The correct answer was: ${cleanAnswer}.`
         ).catch(() => {});
       }
+    }   // end for loop
 
     // Mark prediction completed
     await supabase
