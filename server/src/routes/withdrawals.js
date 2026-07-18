@@ -76,50 +76,93 @@ router.put('/:id/approve', async (req, res) => {
       });
     }
 
-    // Fetch app settings to get payout bank info and verify
-    const { data: settings } = await supabase
-      .from('app_settings')
-      .select('payout_bank_name, payout_account_name, payout_account_number')
-      .eq('id', 1)
-      .single();
+    // Guard: bank_code is required for Paystack transfer recipient creation.
+    // Rows created before the bank_code migration will lack this field.
+    if (!withdrawal.bank_code) {
+      return res.status(422).json({
+        success: false,
+        code: 'MISSING_BANK_CODE',
+        error: 'This withdrawal request has no bank_code stored. The player must re-submit their withdrawal with the correct bank selected, or an admin must update the bank_code manually via SQL before approving.',
+      });
+    }
 
-    let transferReference = `wdl_${uuidv4()}`;
+    // Idempotency: if a transfer_reference is already stored, a previous approve call
+    // got far enough to generate a reference — don't create a second transfer.
+    // Check if Paystack already has a successful transfer for this reference.
+    if (withdrawal.transfer_reference) {
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_PROCESSED',
+        error: `This withdrawal was already approved with transfer reference ${withdrawal.transfer_reference}. Check Paystack dashboard for transfer status.`,
+      });
+    }
+
+    const transferReference = `wdl_${uuidv4()}`;
+
+    // Store the reference immediately before calling Paystack —
+    // this means if the server crashes mid-call, a retry will be blocked
+    // and the admin can check Paystack manually rather than double-paying.
+    await supabase
+      .from('withdrawal_requests')
+      .update({ transfer_reference: transferReference })
+      .eq('id', id);
+
     let paystackTransferCode = null;
     let transferError = null;
+    let recipientCode = withdrawal.recipient_code || null;
 
     try {
-      // Create transfer recipient
-      // Note: In production, bank_code lookup is required. Here we pass bank_name as a placeholder.
-      // Frontend should collect bank_code and store it, or use Paystack /bank to resolve.
-      const recipientRes = await paystack.createTransferRecipient({
-        name: withdrawal.phone,
-        accountNumber: withdrawal.account_number,
-        bankCode: withdrawal.bank_name, // Ideally the bank code, not name
-      });
+      // Re-use existing recipient_code if we already created this recipient
+      if (!recipientCode) {
+        const recipientRes = await paystack.createTransferRecipient({
+          name: withdrawal.bank_name || withdrawal.phone,
+          accountNumber: withdrawal.account_number,
+          bankCode: withdrawal.bank_code,   // ← correct field, always numeric code
+        });
 
-      if (!recipientRes.status) {
-        throw new Error('Failed to create Paystack recipient');
+        if (!recipientRes.status) {
+          throw new Error(`Paystack recipient creation failed: ${recipientRes.message || 'unknown error'}`);
+        }
+
+        recipientCode = recipientRes.data.recipient_code;
+
+        // Persist recipient_code so we can re-use it on retry without creating duplicates
+        await supabase
+          .from('withdrawal_requests')
+          .update({ recipient_code: recipientCode })
+          .eq('id', id);
       }
-
-      const recipientCode = recipientRes.data.recipient_code;
 
       // Initiate transfer
       const transferRes = await paystack.initiateTransfer({
         amountKobo: withdrawal.amount * 100,
         recipientCode,
         reference: transferReference,
-        reason: `Triple Threat withdrawal for ${withdrawal.phone}`,
+        reason: `BitLyfe withdrawal for ${withdrawal.phone}`,
       });
 
       if (!transferRes.status) {
-        throw new Error('Paystack transfer initiation failed');
+        throw new Error(`Paystack transfer failed: ${transferRes.message || 'unknown error'}`);
       }
 
       paystackTransferCode = transferRes.data.transfer_code;
     } catch (paystackErr) {
       console.error('Paystack transfer error:', paystackErr.message);
       transferError = paystackErr.message;
-      // Continue to mark as approved even if Paystack fails — admin can retry manually
+
+      // Clear the transfer_reference we just stored so the admin can retry cleanly
+      await supabase
+        .from('withdrawal_requests')
+        .update({ transfer_reference: null })
+        .eq('id', id);
+
+      // Do NOT mark as approved — the money hasn't moved
+      return res.status(502).json({
+        success: false,
+        code: 'PAYSTACK_ERROR',
+        error: `Paystack transfer failed: ${transferError}. Withdrawal remains pending — fix the issue and try again.`,
+        transferReference,
+      });
     }
 
     // Update withdrawal to approved
@@ -157,10 +200,7 @@ router.put('/:id/approve', async (req, res) => {
         withdrawal: updated,
         transferReference,
         paystackTransferCode,
-        transferError: transferError || null,
-        message: transferError
-          ? `Approved but Paystack transfer failed: ${transferError}. Process manually.`
-          : 'Withdrawal approved and transfer initiated',
+        message: 'Withdrawal approved and transfer initiated',
       },
     });
   } catch (err) {

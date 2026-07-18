@@ -100,7 +100,10 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
   amount INT NOT NULL,
   method TEXT,
   account_number TEXT,
-  bank_name TEXT,
+  bank_name TEXT,                    -- display only (e.g. "GTBank")
+  bank_code TEXT,                    -- Paystack numeric bank code (e.g. "058") — required for transfers
+  recipient_code TEXT,               -- Paystack transfer recipient code — stored to avoid duplicate recipients
+  transfer_reference TEXT,           -- idempotency key for the Paystack transfer
   status TEXT DEFAULT 'pending',
   reject_reason TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()

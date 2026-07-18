@@ -384,19 +384,90 @@ router.get('/transactions', auth, async (req, res) => {
 });
 
 /**
+ * GET /api/wallet/banks
+ * Returns Paystack's list of supported Nigerian banks.
+ * Frontend uses this to render a bank picker — never let the player type a bank name freely.
+ * Response is cached for 1 hour since the list rarely changes.
+ */
+let banksCache = null;
+let banksCacheExpiry = 0;
+
+router.get('/banks', auth, async (req, res) => {
+  try {
+    const now = Date.now();
+    if (!banksCache || now > banksCacheExpiry) {
+      const paystackRes = await paystack.getBankList();
+      if (!paystackRes.status) {
+        return res.status(502).json({ success: false, error: 'Failed to fetch bank list from Paystack' });
+      }
+      banksCache = paystackRes.data.map((b) => ({
+        name: b.name,
+        code: b.code,
+        type: b.type,
+      }));
+      banksCacheExpiry = now + 60 * 60 * 1000; // 1 hour
+    }
+    return res.json({ success: true, data: { banks: banksCache } });
+  } catch (err) {
+    console.error('Bank list error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch bank list' });
+  }
+});
+
+/**
+ * GET /api/wallet/resolve-account?account_number=&bank_code=
+ * Resolves an account number to an account name via Paystack.
+ * Frontend calls this after the player enters their account number + selects a bank,
+ * so they can confirm "Is this your name?" before submitting the withdrawal.
+ */
+router.get('/resolve-account', auth, async (req, res) => {
+  try {
+    const { account_number, bank_code } = req.query;
+
+    if (!account_number || !bank_code) {
+      return res.status(400).json({ success: false, error: 'account_number and bank_code are required' });
+    }
+
+    const paystackRes = await paystack.resolveAccountNumber(account_number, bank_code);
+
+    if (!paystackRes.status) {
+      return res.status(400).json({ success: false, error: 'Could not resolve account. Check the account number and bank.' });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        account_name: paystackRes.data.account_name,
+        account_number: paystackRes.data.account_number,
+      },
+    });
+  } catch (err) {
+    // Paystack returns 422 for unresolvable accounts — surface a clean message
+    const status = err?.response?.status;
+    if (status === 422 || status === 400) {
+      return res.status(400).json({ success: false, error: 'Account number not found at this bank. Please check and try again.' });
+    }
+    console.error('Resolve account error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to resolve account number' });
+  }
+});
+
+/**
  * POST /api/wallet/withdraw
  * Create a withdrawal request.
- * Body: { amount, method, accountNumber, bankName }
+ * Body: { amount, method, accountNumber, bankCode, bankName }
+ *   bankCode  — Paystack numeric bank code (e.g. "058"). Required.
+ *   bankName  — Human-readable bank name. Stored for display, not used for transfers.
  */
 router.post('/withdraw', auth, async (req, res) => {
   try {
-    const { amount, method, accountNumber, bankName } = req.body;
+    const { amount, method, accountNumber, bankCode, bankName } = req.body;
     const player = req.player;
 
-    if (!amount || !method || !accountNumber || !bankName) {
+    if (!amount || !method || !accountNumber || !bankCode) {
       return res.status(400).json({
         success: false,
-        error: 'amount, method, accountNumber, and bankName are required',
+        error: 'amount, method, accountNumber, and bankCode are required. Use GET /api/wallet/banks to get the correct bankCode.',
       });
     }
 
@@ -448,7 +519,8 @@ router.post('/withdraw', auth, async (req, res) => {
         amount: amountNum,
         method,
         account_number: accountNumber,
-        bank_name: bankName,
+        bank_code: bankCode,
+        bank_name: bankName || null,   // display only — not used for transfers
         status: 'pending',
       })
       .select()
