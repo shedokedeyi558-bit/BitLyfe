@@ -88,6 +88,41 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * GET /api/admin/predictions/audit-log
+ * Returns the admin audit log for prediction-related manual actions.
+ * Query params: ?playerId=<uuid>&limit=20&page=1
+ */
+router.get('/audit-log', async (req, res) => {
+  try {
+    const { playerId, page = 1, limit = 20 } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+
+    let query = supabase
+      .from('admin_audit_log')
+      .select('*', { count: 'exact' })
+      .eq('action', 'resolve_stuck_prediction_entry')
+      .order('created_at', { ascending: false })
+      .range(offset, offset + Number(limit) - 1);
+
+    if (playerId) query = query.eq('player_id', playerId);
+
+    const { data, error, count } = await query;
+
+    if (error) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch audit log' });
+    }
+
+    return res.json({
+      success: true,
+      data: { logs: data, total: count, page: Number(page), limit: Number(limit) },
+    });
+  } catch (err) {
+    console.error('Audit log fetch error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch audit log' });
+  }
+});
+
+/**
  * GET /api/admin/predictions/stats
  * Prediction statistics and analytics
  */
@@ -528,6 +563,290 @@ router.get('/:id/participants', async (req, res) => {
   } catch (err) {
     console.error('Get prediction participants error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch participants' });
+  }
+});
+
+/**
+ * POST /api/admin/predictions/:id/resolve-stuck-entry
+ *
+ * Manually resolves a stuck prediction entry where a player paid but their
+ * answer was never recorded (e.g. due to a submission race condition bug).
+ *
+ * Two resolutions:
+ *   "record_answer" — write the player's intended answer into the participation
+ *                     row so it is evaluated normally when the admin runs mark-answer.
+ *                     Use when: the player's intended answer is known and the
+ *                     prediction has not yet been marked (correct_answer is still null).
+ *
+ *   "refund"        — credit the entry fee back to the player's real balance.
+ *                     Use when: the prediction is already completed/revealed so there
+ *                     is no way to evaluate a late answer, or the intended answer
+ *                     cannot be recovered.
+ *
+ * Body:
+ *   {
+ *     "playerId":   "<uuid>",          // required
+ *     "resolution": "record_answer" | "refund",   // required
+ *     "answer":     "<string>",        // required when resolution === "record_answer"
+ *     "notes":      "<string>"         // required — admin explains why they are doing this
+ *   }
+ *
+ * Every call is written to admin_audit_log regardless of outcome.
+ * Requires: DATABASE_MIGRATION_ADMIN_AUDIT_LOG.sql to have been run.
+ */
+router.post('/:id/resolve-stuck-entry', async (req, res) => {
+  const { id: predictionId } = req.params;
+  const { playerId, resolution, answer, notes } = req.body;
+  const admin = req.admin;
+
+  // ── Input validation ────────────────────────────────────────────────────────
+  if (!playerId) {
+    return res.status(400).json({ success: false, error: 'playerId is required' });
+  }
+  if (!['record_answer', 'refund'].includes(resolution)) {
+    return res.status(400).json({ success: false, error: 'resolution must be "record_answer" or "refund"' });
+  }
+  if (resolution === 'record_answer' && (!answer || String(answer).trim() === '')) {
+    return res.status(400).json({ success: false, error: 'answer is required when resolution is "record_answer"' });
+  }
+  if (!notes || String(notes).trim().length < 10) {
+    return res.status(400).json({ success: false, error: 'notes is required (minimum 10 characters) — explain why this manual action is necessary' });
+  }
+
+  const cleanNotes = String(notes).trim();
+  const adminEmail = admin.email || 'unknown';
+
+  try {
+    // ── Fetch prediction ──────────────────────────────────────────────────────
+    const { data: prediction, error: predErr } = await supabase
+      .from('predictions')
+      .select('id, question, status, correct_answer, entry_fee, countdown_end_time')
+      .eq('id', predictionId)
+      .single();
+
+    if (predErr || !prediction) {
+      return res.status(404).json({ success: false, error: 'Prediction not found' });
+    }
+
+    // ── Fetch participation ───────────────────────────────────────────────────
+    const { data: participation, error: partErr } = await supabase
+      .from('prediction_participations')
+      .select('id, answer, submitted_at, is_correct, amount_won, created_at')
+      .eq('prediction_id', predictionId)
+      .eq('player_id', playerId)
+      .maybeSingle();
+
+    if (partErr) {
+      console.error('resolve-stuck-entry participation lookup error:', partErr);
+      return res.status(500).json({ success: false, error: 'Failed to look up participation record' });
+    }
+
+    if (!participation) {
+      return res.status(404).json({
+        success: false,
+        error: 'No participation record found for this player + prediction. The entry fee may not have been recorded — check transactions manually.',
+      });
+    }
+
+    // ── Guard: don't overwrite an already-submitted answer ───────────────────
+    if (participation.answer !== null && resolution === 'record_answer') {
+      return res.status(409).json({
+        success: false,
+        error: `Player already has a recorded answer ("${participation.answer}"). This entry is not stuck.`,
+      });
+    }
+
+    // ── Snapshot for audit log ───────────────────────────────────────────────
+    const auditPayload = {
+      prediction: {
+        id: prediction.id,
+        question: prediction.question,
+        status: prediction.status,
+        correct_answer: prediction.correct_answer || null,
+        countdown_end_time: prediction.countdown_end_time,
+      },
+      participation_before: {
+        id: participation.id,
+        answer: participation.answer,
+        submitted_at: participation.submitted_at,
+        is_correct: participation.is_correct,
+        amount_won: participation.amount_won,
+      },
+      resolution,
+      answer_recorded: resolution === 'record_answer' ? String(answer).trim() : null,
+    };
+
+    // ── Execute resolution ────────────────────────────────────────────────────
+
+    if (resolution === 'record_answer') {
+      // Validate: can only record an answer if correct_answer hasn't been set yet
+      // (if the prediction is already marked, recording a late answer would be meaningless
+      // unless the admin intends to include it — we allow it but flag it in the response)
+      const cleanAnswer = String(answer).trim();
+      const alreadyRevealed = prediction.correct_answer !== null && prediction.status === 'completed';
+
+      // Write the answer into the participation row
+      const { error: updateErr } = await supabase
+        .from('prediction_participations')
+        .update({
+          answer: cleanAnswer,
+          submitted_at: new Date().toISOString(),
+        })
+        .eq('id', participation.id);
+
+      if (updateErr) {
+        console.error('resolve-stuck-entry answer write error:', updateErr);
+        return res.status(500).json({ success: false, error: 'Failed to write answer to participation record' });
+      }
+
+      auditPayload.participation_after = {
+        answer: cleanAnswer,
+        submitted_at: new Date().toISOString(),
+      };
+
+      // If prediction is already revealed, immediately evaluate correctness and credit if won
+      let creditedPrize = null;
+      if (alreadyRevealed) {
+        const isCorrect =
+          cleanAnswer.toLowerCase().trim() === prediction.correct_answer.toLowerCase().trim();
+        const prizePerWinner = parseFloat(prediction.prize_per_winner || 0);
+        const amountWon = isCorrect ? prizePerWinner : 0;
+
+        await supabase
+          .from('prediction_participations')
+          .update({ is_correct: isCorrect, amount_won: amountWon })
+          .eq('id', participation.id);
+
+        if (isCorrect && amountWon > 0) {
+          const { data: freshPlayer } = await supabase
+            .from('players')
+            .select('balance')
+            .eq('id', playerId)
+            .single();
+
+          const newBalance = (freshPlayer?.balance || 0) + amountWon;
+          await supabase.from('players').update({ balance: newBalance }).eq('id', playerId);
+          await supabase.from('transactions').insert({
+            player_id: playerId,
+            type: 'prediction_win',
+            amount: amountWon,
+            description: `Admin-resolved win: prediction "${prediction.question.substring(0, 50)}..." (stuck entry corrected by ${adminEmail})`,
+          });
+          creditedPrize = amountWon;
+        }
+
+        auditPayload.auto_evaluated = { is_correct: isCorrect, amount_won: amountWon };
+      }
+
+      // Write audit log
+      await supabase.from('admin_audit_log').insert({
+        admin_id: admin.id,
+        admin_email: adminEmail,
+        action: 'resolve_stuck_prediction_entry',
+        entity_type: 'prediction_participation',
+        entity_id: participation.id,
+        player_id: playerId,
+        resolution: 'record_answer',
+        notes: cleanNotes,
+        payload: auditPayload,
+      });
+
+      return res.json({
+        success: true,
+        data: {
+          resolution: 'record_answer',
+          answer_recorded: cleanAnswer,
+          already_revealed: alreadyRevealed,
+          credited_prize: creditedPrize,
+          message: alreadyRevealed
+            ? `Answer recorded and evaluated against already-revealed correct answer "${prediction.correct_answer}". ${creditedPrize ? `Player credited ₦${creditedPrize}.` : 'Player did not win.'}`
+            : `Answer recorded. It will be evaluated normally when you run mark-answer for this prediction.`,
+        },
+      });
+    }
+
+    // resolution === 'refund'
+    const entryFee = parseFloat(prediction.entry_fee);
+
+    // Idempotency: check if a manual-refund transaction already exists for this participation
+    const { data: existingRefund } = await supabase
+      .from('transactions')
+      .select('id')
+      .eq('player_id', playerId)
+      .eq('type', 'prediction_refund')
+      .ilike('description', `%${participation.id}%`)
+      .maybeSingle();
+
+    if (existingRefund) {
+      return res.status(409).json({
+        success: false,
+        error: 'A refund for this participation has already been issued. Check transactions for this player.',
+      });
+    }
+
+    // Credit real balance (not bonus — manual refunds always go to withdrawable balance)
+    const { data: freshPlayer } = await supabase
+      .from('players')
+      .select('balance')
+      .eq('id', playerId)
+      .single();
+
+    if (!freshPlayer) {
+      return res.status(404).json({ success: false, error: 'Player not found' });
+    }
+
+    const newBalance = (freshPlayer.balance || 0) + entryFee;
+
+    const { error: balanceErr } = await supabase
+      .from('players')
+      .update({ balance: newBalance })
+      .eq('id', playerId);
+
+    if (balanceErr) {
+      console.error('resolve-stuck-entry balance update error:', balanceErr);
+      return res.status(500).json({ success: false, error: 'Failed to credit refund to player balance' });
+    }
+
+    const { error: txnErr } = await supabase.from('transactions').insert({
+      player_id: playerId,
+      type: 'prediction_refund',
+      amount: entryFee,
+      description: `Admin manual refund: stuck entry on prediction "${prediction.question.substring(0, 50)}..." (participation ${participation.id}) — actioned by ${adminEmail}`,
+    });
+
+    if (txnErr) {
+      // Balance was credited but transaction log failed — log loudly, don't roll back
+      console.error('CRITICAL: refund credited but transaction log failed. Player:', playerId, 'Amount:', entryFee, 'Participation:', participation.id, txnErr);
+    }
+
+    auditPayload.refund_amount = entryFee;
+    auditPayload.new_balance = newBalance;
+
+    // Write audit log
+    await supabase.from('admin_audit_log').insert({
+      admin_id: admin.id,
+      admin_email: adminEmail,
+      action: 'resolve_stuck_prediction_entry',
+      entity_type: 'prediction_participation',
+      entity_id: participation.id,
+      player_id: playerId,
+      resolution: 'refund',
+      notes: cleanNotes,
+      payload: auditPayload,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        resolution: 'refund',
+        amount_refunded: entryFee,
+        new_balance: newBalance,
+        message: `₦${entryFee} refunded to player's real balance. Transaction and audit log recorded.`,
+      },
+    });
+  } catch (err) {
+    console.error('resolve-stuck-entry error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to resolve stuck entry' });
   }
 });
 
