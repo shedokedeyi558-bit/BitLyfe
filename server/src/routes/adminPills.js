@@ -72,16 +72,17 @@ router.get('/packs', async (req, res) => {
         available_count: availableCount,
         played_count: packPills.filter((p) => p.status === 'played').length,
         expired_count: packPills.filter((p) => p.status === 'expired').length,
+        // display_status: computed on read — for standard packs, 'exhausted' when
+        // all pills have been played and none remain. Specials use quiz_expired instead.
+        display_status: !isSpecial && pack.status === 'active'
+          ? (availableCount === 0 ? 'exhausted' : 'active')
+          : pack.status,
         // ── Entropy fields ─────────────────────────────────────────────────
         bank_ratio: bankRatio,
         low_entropy_warning: lowEntropyWarning,
         recommended_bank_size: recommendedBankSize,
         // ── Quiz expiry fields ─────────────────────────────────────────────
-        // quiz_expires_at: admin-set expiry for this Pills/Specials pack.
-        // Independent of entry_window_end (Time Machine only).
         quiz_expires_at: pack.quiz_expires_at || null,
-        // quiz_expired: true once the expiry time has passed.
-        // Admin panel should show the pack as "Ended" when this is true.
         quiz_expired: pack.quiz_expires_at ? new Date(pack.quiz_expires_at) < new Date() : false,
       };
     });

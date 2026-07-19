@@ -205,6 +205,13 @@ router.get('/packs', auth, async (req, res) => {
           quiz_expires_at: pack.quiz_expires_at || null,
 
           pills: packPills,
+          // display_status: computed on read for standard packs — never trust pack.status alone
+          // 'exhausted' = active pack with no available pills left (all played or none added)
+          // 'active'    = pack is live with at least one available pill
+          // passes through for non-standard states (inactive, draft)
+          display_status: !isSpecial && pack.status === 'active'
+            ? (packPills.filter((p) => p.status === 'available').length === 0 ? 'exhausted' : 'active')
+            : pack.status,
         };
       })
       .filter((pack) => pack.pills.some((pill) => pill.status === 'available'));
