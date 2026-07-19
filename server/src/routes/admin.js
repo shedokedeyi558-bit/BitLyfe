@@ -336,6 +336,33 @@ router.put('/doors/:id', async (req, res) => {
 // ─── PLAYERS ─────────────────────────────────────────────────────────────────
 
 /**
+ * Compute live cross-game stats for a player from the transactions table.
+ * This is the single source of truth — the players.games_played/games_won/total_won
+ * denormalized counters are only updated by door games and are NOT reliable for
+ * Pills, Predictions, Specials, or Blitz activity.
+ */
+async function computePlayerStats(playerId) {
+  const { data: txns } = await supabase
+    .from('transactions')
+    .select('type, amount')
+    .eq('player_id', playerId);
+
+  const WIN_TYPES   = ['prize', 'pill_win', 'prediction_win', 'blitz_prize', 'challenge_win'];
+  const ENTRY_TYPES = ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry'];
+
+  const entries  = (txns || []).filter((t) => ENTRY_TYPES.includes(t.type));
+  const wins     = (txns || []).filter((t) => WIN_TYPES.includes(t.type));
+  const totalWon = wins.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+  return {
+    games_played: entries.length,
+    games_won:    wins.length,
+    total_won:    totalWon,
+    win_rate:     entries.length > 0 ? parseFloat(((wins.length / entries.length) * 100).toFixed(1)) : 0,
+  };
+}
+
+/**
  * GET /api/admin/players
  */
 router.get('/players', async (req, res) => {
@@ -345,7 +372,7 @@ router.get('/players', async (req, res) => {
 
     let query = supabase
       .from('players')
-      .select('id, phone, name, balance, games_played, games_won, total_won, status, created_at', { count: 'exact' })
+      .select('id, phone, name, balance, status, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1);
 
@@ -356,10 +383,79 @@ router.get('/players', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch players' });
 
-    return res.json({ success: true, data: { players: data, total: count, page: Number(page), limit: Number(limit) } });
+    // Compute live stats for all players on this page in parallel
+    const playersWithStats = await Promise.all(
+      (data || []).map(async (player) => {
+        const stats = await computePlayerStats(player.id);
+        return { ...player, ...stats };
+      })
+    );
+
+    return res.json({ success: true, data: { players: playersWithStats, total: count, page: Number(page), limit: Number(limit) } });
   } catch (err) {
     console.error('Get players error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch players' });
+  }
+});
+
+/**
+ * GET /api/admin/players/:id/stats
+ * Live cross-game stats for a specific player.
+ * Use this for the player detail view — more accurate than the list.
+ */
+router.get('/players/:id/stats', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: player } = await supabase
+      .from('players')
+      .select('id, phone, name, balance, bonus_balance, status, created_at')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (!player) return res.status(404).json({ success: false, error: 'Player not found' });
+
+    const stats = await computePlayerStats(id);
+
+    // Break down by game mode for the detail view
+    const { data: txns } = await supabase
+      .from('transactions')
+      .select('type, amount, created_at')
+      .eq('player_id', id)
+      .order('created_at', { ascending: false });
+
+    const byMode = {
+      pills:       { played: 0, won: 0, total_won: 0 },
+      predictions: { played: 0, won: 0, total_won: 0 },
+      blitz:       { played: 0, won: 0, total_won: 0 },
+      doors:       { played: 0, won: 0, total_won: 0 },
+      challenges:  { played: 0, won: 0, total_won: 0 },
+    };
+
+    for (const t of txns || []) {
+      const amt = Math.abs(t.amount);
+      if (t.type === 'pill_open')         { byMode.pills.played++; }
+      if (t.type === 'pill_win')          { byMode.pills.won++; byMode.pills.total_won += amt; }
+      if (t.type === 'prediction_enter')  { byMode.predictions.played++; }
+      if (t.type === 'prediction_win')    { byMode.predictions.won++; byMode.predictions.total_won += amt; }
+      if (t.type === 'blitz_entry')       { byMode.blitz.played++; }
+      if (t.type === 'blitz_prize')       { byMode.blitz.won++; byMode.blitz.total_won += amt; }
+      if (t.type === 'entry_fee')         { byMode.doors.played++; }
+      if (t.type === 'prize')             { byMode.doors.won++; byMode.doors.total_won += amt; }
+      if (t.type === 'challenge_entry')   { byMode.challenges.played++; }
+      if (t.type === 'challenge_win')     { byMode.challenges.won++; byMode.challenges.total_won += amt; }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        player: { ...player, ...stats },
+        by_mode: byMode,
+      },
+    });
+  } catch (err) {
+    console.error('Get player stats error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch player stats' });
   }
 });
 
