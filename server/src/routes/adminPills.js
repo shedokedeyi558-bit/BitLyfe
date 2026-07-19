@@ -213,17 +213,8 @@ router.put('/packs/:packId/feature', async (req, res) => {
       });
     }
 
-    // If setting featured: true, clear is_featured on all other standard packs first
-    if (featured) {
-      await supabase
-        .from('pill_packs')
-        .update({ is_featured: false })
-        .or('pack_type.eq.standard,pack_type.is.null')
-        .eq('is_vip', false)
-        .neq('id', packId);
-    }
-
-    // Apply the new featured value
+    // Apply the new featured value — only affects this pack
+    // Multiple packs can be featured simultaneously; no clearing of others
     const { data: updated, error: updateErr } = await supabase
       .from('pill_packs')
       .update({ is_featured: Boolean(featured) })
@@ -239,7 +230,7 @@ router.put('/packs/:packId/feature', async (req, res) => {
       success: true,
       data: {
         pack: updated,
-        message: featured ? `"${pack.name}" is now the featured pack` : `"${pack.name}" is no longer featured`,
+        message: featured ? `"${pack.name}" is now featured` : `"${pack.name}" is no longer featured`,
       },
     });
   } catch (err) {
