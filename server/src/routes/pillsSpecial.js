@@ -401,9 +401,16 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
     }
 
     if (lockCount === 0) {
-      const existingLocks   = attempt.answer_locked_at || [];
-      const existingAnswers = attempt.answers || [];
-      const existingLockedAt = existingLocks[idx]   || null;
+      // Re-fetch attempt to get post-RPC state — pre-RPC attempt.answers may still be null
+      const { data: freshAttemptForRetry } = await supabase
+        .from('special_attempts')
+        .select('answers, answer_locked_at')
+        .eq('id', attemptId)
+        .single();
+
+      const existingLocks   = freshAttemptForRetry?.answer_locked_at || attempt.answer_locked_at || [];
+      const existingAnswers = freshAttemptForRetry?.answers || attempt.answers || [];
+      const existingLockedAt = existingLocks[idx] || null;
       const existingAnswer   = existingAnswers[idx];
 
       if (existingAnswer !== null && existingAnswer !== undefined && String(existingAnswer) === String(answer)) {

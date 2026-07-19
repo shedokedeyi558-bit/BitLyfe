@@ -455,11 +455,17 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
     }
 
     if (lockCount === 0) {
-      // Slot already locked. Determine if this is a same-player retry of the same answer
-      // (connection dropped before the original response arrived) or a genuine conflict.
-      const existingLocks   = attempt.answer_locked_at || [];
-      const existingAnswers = attempt.answers || [];
-      const existingLockedAt  = existingLocks[idx]   || null;
+      // Slot already locked. Re-fetch attempt to get post-RPC state —
+      // pre-RPC attempt.answers may still be null, causing false conflict detection.
+      const { data: freshAttemptForRetry } = await supabase
+        .from('special_attempts')
+        .select('answers, answer_locked_at')
+        .eq('id', sessionId)
+        .single();
+
+      const existingLocks   = freshAttemptForRetry?.answer_locked_at || attempt.answer_locked_at || [];
+      const existingAnswers = freshAttemptForRetry?.answers || attempt.answers || [];
+      const existingLockedAt  = existingLocks[idx] || null;
       const existingAnswer    = existingAnswers[idx];
 
       if (existingAnswer !== null && existingAnswer !== undefined && String(existingAnswer) === String(answer)) {
