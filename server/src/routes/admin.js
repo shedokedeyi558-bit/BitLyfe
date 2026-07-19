@@ -460,31 +460,373 @@ router.get('/players/:id/stats', async (req, res) => {
 });
 
 /**
- * PUT /api/admin/players/:id/ban — toggle ban
+ * GET /api/admin/players/:id
+ * Full player detail — balance breakdown, live stats, referral relationships.
+ * Response shape (frontend depends on exact field names):
+ * {
+ *   player: {
+ *     id, phone, name, status, created_at,
+ *     real_balance,       -- withdrawable (from wins, deposits) — real money
+ *     bonus_balance,      -- from referrals — usable for entries, NOT withdrawable
+ *     total_balance,      -- real_balance + bonus_balance
+ *     games_played, games_won, win_rate, total_won,
+ *     by_mode: { pills, predictions, blitz, doors, challenges }  (each: played, won, total_won)
+ *   },
+ *   referral: {
+ *     referred_by: { id, phone, name } | null,
+ *     referred_players: [{ id, phone, name, status, bonus_amount, completed_at }]
+ *   },
+ *   notes: [{ id, note, admin_email, created_at }]   (last 10, newest first)
+ * }
+ */
+router.get('/players/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: player } = await supabase
+      .from('players')
+      .select('id, phone, name, balance, bonus_balance, status, created_at, referral_code')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (!player) return res.status(404).json({ success: false, error: 'Player not found' });
+
+    // Live stats from transactions
+    const stats = await computePlayerStats(id);
+
+    const { data: txns } = await supabase
+      .from('transactions')
+      .select('type, amount')
+      .eq('player_id', id);
+
+    const byMode = {
+      pills:       { played: 0, won: 0, total_won: 0 },
+      predictions: { played: 0, won: 0, total_won: 0 },
+      blitz:       { played: 0, won: 0, total_won: 0 },
+      doors:       { played: 0, won: 0, total_won: 0 },
+      challenges:  { played: 0, won: 0, total_won: 0 },
+    };
+    for (const t of txns || []) {
+      const amt = Math.abs(t.amount);
+      if (t.type === 'pill_open')        { byMode.pills.played++; }
+      if (t.type === 'pill_win')         { byMode.pills.won++;       byMode.pills.total_won += amt; }
+      if (t.type === 'prediction_enter') { byMode.predictions.played++; }
+      if (t.type === 'prediction_win')   { byMode.predictions.won++; byMode.predictions.total_won += amt; }
+      if (t.type === 'blitz_entry')      { byMode.blitz.played++; }
+      if (t.type === 'blitz_prize')      { byMode.blitz.won++;       byMode.blitz.total_won += amt; }
+      if (t.type === 'entry_fee')        { byMode.doors.played++; }
+      if (t.type === 'prize')            { byMode.doors.won++;        byMode.doors.total_won += amt; }
+      if (t.type === 'challenge_entry')  { byMode.challenges.played++; }
+      if (t.type === 'challenge_win')    { byMode.challenges.won++;   byMode.challenges.total_won += amt; }
+    }
+
+    // Referral: who referred this player?
+    const { data: referralRow } = await supabase
+      .from('referrals')
+      .select('referrer_id, first_deposit_amount, status, completed_at')
+      .eq('referee_id', id)
+      .maybeSingle();
+
+    let referredBy = null;
+    if (referralRow?.referrer_id) {
+      const { data: referrer } = await supabase
+        .from('players')
+        .select('id, phone, name')
+        .eq('id', referralRow.referrer_id)
+        .maybeSingle();
+      referredBy = referrer || null;
+    }
+
+    // Referral: players this player has referred
+    const { data: referralsMade } = await supabase
+      .from('referrals')
+      .select('referee_id, status, first_deposit_amount, completed_at')
+      .eq('referrer_id', id);
+
+    const referredPlayers = await Promise.all(
+      (referralsMade || []).map(async (r) => {
+        const { data: referee } = await supabase
+          .from('players')
+          .select('id, phone, name')
+          .eq('id', r.referee_id)
+          .maybeSingle();
+        return {
+          id: referee?.id || r.referee_id,
+          phone: referee?.phone || null,
+          name: referee?.name || null,
+          status: r.status,
+          completed_at: r.completed_at || null,
+        };
+      })
+    );
+
+    // Recent admin notes (last 10)
+    const { data: notes } = await supabase
+      .from('player_admin_notes')
+      .select('id, note, admin_email, created_at')
+      .eq('player_id', id)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    return res.json({
+      success: true,
+      data: {
+        player: {
+          id: player.id,
+          phone: player.phone,
+          name: player.name,
+          status: player.status,
+          created_at: player.created_at,
+          referral_code: player.referral_code,
+          real_balance: player.balance,
+          bonus_balance: player.bonus_balance || 0,
+          total_balance: (player.balance || 0) + (player.bonus_balance || 0),
+          ...stats,
+          by_mode: byMode,
+        },
+        referral: {
+          referred_by: referredBy,
+          referred_players: referredPlayers,
+        },
+        notes: notes || [],
+      },
+    });
+  } catch (err) {
+    console.error('Get player detail error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch player detail' });
+  }
+});
+
+/**
+ * GET /api/admin/players/:id/activity
+ * Chronological paginated activity log — transactions + withdrawal requests.
+ * Query: ?page=1&limit=20&type=entries|wins|withdrawals|all (default: all)
+ */
+router.get('/players/:id/activity', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { page = 1, limit = 20, type = 'all' } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+
+    let query = supabase
+      .from('transactions')
+      .select('id, type, amount, description, reference, created_at', { count: 'exact' })
+      .eq('player_id', id)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + Number(limit) - 1);
+
+    if (type === 'entries') {
+      query = query.in('type', ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry']);
+    } else if (type === 'wins') {
+      query = query.in('type', ['prize', 'pill_win', 'prediction_win', 'blitz_prize', 'challenge_win', 'referral_bonus', 'referral_milestone_bonus']);
+    } else if (type === 'withdrawals') {
+      query = query.in('type', ['withdrawal', 'withdrawal_pending', 'withdrawal_refund']);
+    }
+
+    const { data: transactions, error, count } = await query;
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to fetch activity' });
+
+    // Fetch withdrawal requests for status info (withdrawal_pending may have status)
+    const { data: withdrawalRequests } = await supabase
+      .from('withdrawal_requests')
+      .select('id, amount, status, transfer_failed_reason, created_at')
+      .eq('player_id', id)
+      .order('created_at', { ascending: false });
+
+    return res.json({
+      success: true,
+      data: {
+        transactions: transactions || [],
+        withdrawal_requests: withdrawalRequests || [],
+        total: count,
+        page: Number(page),
+        limit: Number(limit),
+      },
+    });
+  } catch (err) {
+    console.error('Get player activity error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch activity' });
+  }
+});
+
+/**
+ * GET /api/admin/players/:id/notes
+ * List admin notes for a player, newest first.
+ */
+router.get('/players/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('player_admin_notes')
+      .select('id, note, admin_email, created_at')
+      .eq('player_id', id)
+      .order('created_at', { ascending: false });
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to fetch notes' });
+
+    return res.json({ success: true, data: { notes: data || [] } });
+  } catch (err) {
+    console.error('Get player notes error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch notes' });
+  }
+});
+
+/**
+ * POST /api/admin/players/:id/notes
+ * Add a note to a player. Append-only — notes are never edited or deleted.
+ * Body: { note: string }
+ */
+router.post('/players/:id/notes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body;
+    const admin = req.admin;
+
+    if (!note || String(note).trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'note is required' });
+    }
+
+    // Confirm player exists
+    const { data: player } = await supabase.from('players').select('id').eq('id', id).maybeSingle();
+    if (!player) return res.status(404).json({ success: false, error: 'Player not found' });
+
+    const { data, error } = await supabase
+      .from('player_admin_notes')
+      .insert({
+        player_id: id,
+        admin_id: admin.id,
+        admin_email: admin.email || 'unknown',
+        note: String(note).trim(),
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to save note' });
+
+    return res.status(201).json({ success: true, data: { note: data } });
+  } catch (err) {
+    console.error('Add player note error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to add note' });
+  }
+});
+
+/**
+ * PUT /api/admin/players/:id/ban
+ * Ban a player. Body: { reason: string } — required.
+ * Logs to admin_audit_log (action = 'ban').
  */
 router.put('/players/:id/ban', async (req, res) => {
   try {
     const { id } = req.params;
+    const { reason } = req.body;
+    const admin = req.admin;
 
-    const { data: player } = await supabase.from('players').select('status').eq('id', id).single();
+    if (!reason || String(reason).trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'reason is required when banning a player' });
+    }
 
+    const { data: player } = await supabase.from('players').select('id, phone, status').eq('id', id).maybeSingle();
     if (!player) return res.status(404).json({ success: false, error: 'Player not found' });
 
-    const newStatus = player.status === 'banned' ? 'active' : 'banned';
+    if (player.status === 'banned') {
+      return res.status(409).json({ success: false, error: 'Player is already banned. Use PUT /unban to unban.' });
+    }
 
     const { data, error } = await supabase
       .from('players')
-      .update({ status: newStatus })
+      .update({ status: 'banned' })
       .eq('id', id)
       .select()
       .single();
 
-    if (error) return res.status(500).json({ success: false, error: 'Failed to update player status' });
+    if (error) return res.status(500).json({ success: false, error: 'Failed to ban player' });
 
-    return res.json({ success: true, data: { player: data, message: `Player ${newStatus}` } });
+    // Audit log
+    await supabase.from('admin_audit_log').insert({
+      admin_id: admin.id,
+      admin_email: admin.email || 'unknown',
+      action: 'ban',
+      entity_type: 'player',
+      entity_id: id,
+      player_id: id,
+      notes: String(reason).trim(),
+      payload: { previous_status: player.status, phone: player.phone },
+    }).catch(() => {});
+
+    return res.json({ success: true, data: { player: data, message: 'Player banned' } });
   } catch (err) {
     console.error('Ban player error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to toggle ban status' });
+    return res.status(500).json({ success: false, error: 'Failed to ban player' });
+  }
+});
+
+/**
+ * PUT /api/admin/players/:id/unban
+ * Unban a player. Body: { reason?: string }
+ * Logs to admin_audit_log (action = 'unban').
+ */
+router.put('/players/:id/unban', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const admin = req.admin;
+
+    const { data: player } = await supabase.from('players').select('id, phone, status').eq('id', id).maybeSingle();
+    if (!player) return res.status(404).json({ success: false, error: 'Player not found' });
+
+    if (player.status !== 'banned') {
+      return res.status(409).json({ success: false, error: 'Player is not banned' });
+    }
+
+    const { data, error } = await supabase
+      .from('players')
+      .update({ status: 'active' })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to unban player' });
+
+    // Audit log
+    await supabase.from('admin_audit_log').insert({
+      admin_id: admin.id,
+      admin_email: admin.email || 'unknown',
+      action: 'unban',
+      entity_type: 'player',
+      entity_id: id,
+      player_id: id,
+      notes: reason ? String(reason).trim() : 'Unbanned by admin',
+      payload: { previous_status: 'banned', phone: player.phone },
+    }).catch(() => {});
+
+    return res.json({ success: true, data: { player: data, message: 'Player unbanned' } });
+  } catch (err) {
+    console.error('Unban player error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to unban player' });
+  }
+});
+
+/**
+ * GET /api/admin/players/:id/ban-history
+ * Ban/unban action log for a player from admin_audit_log.
+ */
+router.get('/players/:id/ban-history', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase
+      .from('admin_audit_log')
+      .select('id, action, admin_email, notes, payload, created_at')
+      .eq('player_id', id)
+      .in('action', ['ban', 'unban'])
+      .order('created_at', { ascending: false });
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to fetch ban history' });
+
+    return res.json({ success: true, data: { history: data || [] } });
+  } catch (err) {
+    console.error('Get ban history error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch ban history' });
   }
 });
 
