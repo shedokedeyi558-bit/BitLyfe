@@ -349,7 +349,7 @@ router.post('/create', adminAuth, async (req, res) => {
 
     // ── PREDICTIONS ────────────────────────────────────────────────────────
     if (game_type === 'predictions') {
-      const { title, question, category, entry_fee, prize_per_winner, max_slots, max_participants, countdown_end, event_date } = gameData;
+      const { title, question, category, entry_fee, prize_per_winner, max_participants, countdown_end, event_date } = gameData;
 
       const questionText = question || title;
       if (!questionText || entry_fee === undefined || prize_per_winner === undefined || !countdown_end) {
@@ -364,9 +364,12 @@ router.post('/create', adminAuth, async (req, res) => {
         return res.status(400).json({ success: false, error: 'countdown_end must be a valid ISO date string' });
       }
 
-      // Accept both max_slots (frontend field name) and max_participants (API field name)
-      // Default to 10 only as a last resort — admin should always set this explicitly
-      const resolvedMaxParticipants = Number(max_slots || max_participants || 10);
+      // max_participants is the canonical field name — matches the DB column,
+      // the entry-enforcement check, and the display endpoint.
+      // No fallback alias: the frontend must send max_participants explicitly.
+      const resolvedMaxParticipants = max_participants !== undefined && max_participants !== null
+        ? Number(max_participants)
+        : 10;
 
       const countdownSeconds = Math.max(0, Math.floor((countdownEnd.getTime() - Date.now()) / 1000));
 
