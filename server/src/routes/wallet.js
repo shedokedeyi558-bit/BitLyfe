@@ -75,12 +75,12 @@ router.get('/spend-summary', auth, async (req, res) => {
       .gte('created_at', startOfWeekISO)
       .lte('created_at', nowISO);
 
-    // Get player limits
+    // Get player limits — player may not have any limits set (returns null cleanly)
     const { data: limits } = await supabase
       .from('player_limits')
       .select('daily_limit, weekly_limit')
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     const spentToday = (todayTxns || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
     const spentThisWeek = (weekTxns || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
@@ -143,12 +143,12 @@ router.put('/limits', auth, async (req, res) => {
         .json({ success: false, error: 'daily_limit and weekly_limit must be non-negative integers or null' });
     }
 
-    // Check if limits already exist
+    // Check if limits already exist — player may not have any yet
     const { data: existing } = await supabase
       .from('player_limits')
       .select('id')
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     let result;
     if (existing) {

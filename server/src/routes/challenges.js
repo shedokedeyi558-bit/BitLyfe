@@ -94,13 +94,13 @@ router.get('/:id', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Challenge not found' });
     }
 
-    // Check if player has joined
+    // Check if player has joined — may not have
     const { data: myParticipation } = await supabase
       .from('challenge_participations')
       .select('id, player_answer, is_correct, amount_won')
       .eq('challenge_id', id)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     // Check if answer should be revealed (only after admin reveals)
     const shouldRevealAnswer = challenge.status === 'closed' && challenge.correct_answer;
@@ -174,13 +174,13 @@ router.post('/:id/join', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Challenge countdown has expired' });
     }
 
-    // Validation: User not already joined
+    // Validation: User not already joined — may not have joined yet
     const { data: existingParticipation } = await supabase
       .from('challenge_participations')
       .select('id')
       .eq('challenge_id', id)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (existingParticipation) {
       return res.status(400).json({ success: false, error: 'You have already joined this challenge' });

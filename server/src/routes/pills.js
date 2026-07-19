@@ -30,12 +30,12 @@ async function checkSpendLimit(playerId, chargeAmount) {
   const startOfWeekISO = startOfWeek.toISOString();
   const nowISO = now.toISOString();
 
-  // Get player limits
+  // Get player limits — player may not have any set
   const { data: limits } = await supabase
     .from('player_limits')
     .select('daily_limit, weekly_limit')
     .eq('player_id', playerId)
-    .single();
+    .maybeSingle();
 
   if (!limits) {
     return { allowed: true }; // No limits set

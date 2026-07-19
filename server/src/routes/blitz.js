@@ -29,12 +29,12 @@ async function checkSpendLimit(playerId, chargeAmount) {
   const startOfWeekISO = startOfWeek.toISOString();
   const nowISO = now.toISOString();
 
-  // Get player limits
+  // Get player limits — player may not have any set (returns null cleanly with maybeSingle)
   const { data: limits } = await supabase
     .from('player_limits')
     .select('daily_limit, weekly_limit')
     .eq('player_id', playerId)
-    .single();
+    .maybeSingle();
 
   if (!limits) {
     return { allowed: true }; // No limits set
@@ -175,21 +175,21 @@ router.get('/:id', auth, async (req, res) => {
 
     if (error || !tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
 
-    // Check player registration
+    // Check player registration — may not exist, use maybeSingle
     const { data: registration } = await supabase
       .from('blitz_registrations')
       .select('id, registered_at, entry_fee_paid')
       .eq('tournament_id', id)
       .eq('player_id', playerId)
-      .single();
+      .maybeSingle();
 
-    // Check player attempt
+    // Check player attempt — may not exist, use maybeSingle
     const { data: attempt } = await supabase
       .from('blitz_attempts')
       .select('id, score, status, completed_at')
       .eq('tournament_id', id)
       .eq('player_id', playerId)
-      .single();
+      .maybeSingle();
 
     return res.json({
       success: true,
@@ -278,13 +278,13 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Tournament registration is not open' });
     }
 
-    // Check already registered
+    // Check already registered — player may not be registered yet
     const { data: existing } = await supabase
       .from('blitz_registrations')
       .select('id')
       .eq('tournament_id', id)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (existing) return res.status(409).json({ success: false, error: 'Already registered for this tournament' });
 
@@ -427,23 +427,23 @@ router.post('/:id/attempt/start', auth, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Tournament playing window is not open' });
     }
 
-    // Must be registered
+    // Must be registered — player may not be registered
     const { data: registration } = await supabase
       .from('blitz_registrations')
       .select('id')
       .eq('tournament_id', id)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (!registration) return res.status(403).json({ success: false, error: 'You are not registered for this tournament' });
 
-    // One attempt per player
+    // One attempt per player — player may not have attempted yet
     const { data: existingAttempt } = await supabase
       .from('blitz_attempts')
       .select('id, status')
       .eq('tournament_id', id)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (existingAttempt) {
       if (existingAttempt.status === 'completed') {
@@ -512,13 +512,13 @@ router.post('/:id/attempt/submit', auth, async (req, res) => {
 
     if (tErr || !tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
 
-    // Fetch player's attempt
+    // Fetch player's attempt — may not exist if player never started
     const { data: attempt } = await supabase
       .from('blitz_attempts')
       .select('*')
       .eq('tournament_id', id)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (!attempt) return res.status(403).json({ success: false, error: 'No active attempt found. Start attempt first.' });
     if (attempt.status === 'completed') return res.status(409).json({ success: false, error: 'Attempt already submitted' });
@@ -619,20 +619,20 @@ router.get('/:id/results', auth, async (req, res) => {
       .eq('status', 'completed')
       .neq('player_id', playerId);
 
+    // Player's own attempt and prize — may not exist
     const { data: myAttempt } = await supabase
       .from('blitz_attempts')
       .select('score, total_time_ms')
       .eq('tournament_id', id)
       .eq('player_id', playerId)
-      .single();
+      .maybeSingle();
 
-    // Fetch player's prize if any
     const { data: myPrize } = await supabase
       .from('blitz_prizes')
       .select('position, prize_type, amount, ticket_code')
       .eq('tournament_id', id)
       .eq('player_id', playerId)
-      .single();
+      .maybeSingle();
 
     return res.json({
       success: true,
