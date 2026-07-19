@@ -130,18 +130,25 @@ router.get('/packs', auth, async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
     }
 
-    // Fetch this player's played pills
+    // Fetch this player's pill_plays for these pills — distinguish pending (paid, not answered) from played (answered)
     const pillIds = (pills || []).map((p) => p.id);
-    let playedSet = new Set();
+    let playedSet = new Set();   // locked_at is NOT null — answer submitted
+    let pendingSet = new Set();  // locked_at IS null — paid but not yet answered (resume state)
 
     if (pillIds.length > 0) {
       const { data: plays } = await supabase
         .from('pill_plays')
-        .select('pill_id')
+        .select('pill_id, locked_at')
         .eq('player_id', playerId)
         .in('pill_id', pillIds);
 
-      playedSet = new Set((plays || []).map((p) => p.pill_id));
+      for (const play of plays || []) {
+        if (play.locked_at !== null) {
+          playedSet.add(play.pill_id);   // fully answered
+        } else {
+          pendingSet.add(play.pill_id);  // paid but not submitted — resumable
+        }
+      }
     }
 
     // Group pills by pack, mark per-player status
@@ -160,7 +167,12 @@ router.get('/packs', auth, async (req, res) => {
         color: pill.color || '#00FF66',
         price: effectiveFee,
         prize: effectivePrize,
-        status: playedSet.has(pill.id) ? 'played' : 'available',
+        // 'played'  = answered (locked_at set)
+        // 'pending' = paid but not yet answered — frontend shows Resume, not Pay
+        // 'available' = never opened
+        status: playedSet.has(pill.id) ? 'played'
+               : pendingSet.has(pill.id) ? 'pending'
+               : 'available',
       });
     }
 
@@ -206,15 +218,16 @@ router.get('/packs', auth, async (req, res) => {
 
           pills: packPills,
           // display_status: computed on read for standard packs — never trust pack.status alone
-          // 'exhausted' = active pack with no available pills left (all played or none added)
-          // 'active'    = pack is live with at least one available pill
+          // 'exhausted' = active pack with no available or pending pills left
+          // 'active'    = pack is live with at least one available or pending pill
           // passes through for non-standard states (inactive, draft)
           display_status: !isSpecial && pack.status === 'active'
-            ? (packPills.filter((p) => p.status === 'available').length === 0 ? 'exhausted' : 'active')
+            ? (packPills.filter((p) => p.status === 'available' || p.status === 'pending').length === 0 ? 'exhausted' : 'active')
             : pack.status,
         };
       })
-      .filter((pack) => pack.pills.some((pill) => pill.status === 'available'));
+      // Keep pack visible if any pill is available (never opened) OR pending (paid but not answered)
+      .filter((pack) => pack.pills.some((pill) => pill.status === 'available' || pill.status === 'pending'));
 
     return res.json({ success: true, data: { packs: result } });
   } catch (err) {
@@ -385,16 +398,58 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'Pill has expired' });
     }
 
-    // Check if this player already played this pill
+    // Check if this player already has a pill_plays row for this pill
     const { data: existingPlay } = await supabase
       .from('pill_plays')
-      .select('id')
+      .select('id, locked_at, submitted_answer, won')
       .eq('pill_id', pillId)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
 
     if (existingPlay) {
-      return res.status(409).json({ success: false, error: 'Pill already played' });
+      if (existingPlay.locked_at !== null) {
+        // Answer already submitted — this pill is genuinely done
+        return res.status(409).json({ success: false, error: 'Pill already played' });
+      }
+
+      // ── Resume path: player paid but never answered ──────────────────────
+      // They left before submitting (app close, navigation, etc.).
+      // Return the question data again WITHOUT charging — balance is already held.
+      let resumePrize = parseFloat(pill.prize);
+      if (pill.pack_id) {
+        const { data: pack } = await supabase
+          .from('pill_packs')
+          .select('prize')
+          .eq('id', pill.pack_id)
+          .single();
+        if (pack?.prize !== null && pack?.prize !== undefined) {
+          resumePrize = parseFloat(pack.prize);
+        }
+      }
+
+      // Fetch current balance to return accurate balance in response
+      const { data: freshPlayer } = await supabase
+        .from('players')
+        .select('balance, bonus_balance')
+        .eq('id', player.id)
+        .single();
+
+      return res.json({
+        success: true,
+        resumed: true,   // frontend uses this to skip the payment step
+        data: {
+          question: pill.question,
+          category: pill.category,
+          format: pill.format,
+          options: pill.options,
+          timer: pill.timer_seconds,
+          prize: resumePrize,
+          entryFee: 0,   // already paid — no charge on resume
+          newBalance: freshPlayer?.balance ?? player.balance,
+          newBonusBalance: freshPlayer?.bonus_balance ?? (player.bonus_balance || 0),
+          bonusUsed: 0,
+        },
+      });
     }
 
     // Resolve entry_fee: use pack-level if pill belongs to a pack with one set
