@@ -515,13 +515,20 @@ router.post('/submit', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Pill not found' });
     }
 
-    // Verify this player opened this pill
-    const { data: play } = await supabase
+    // Verify this player opened this pill — use maybeSingle() not single()
+    // .single() throws PGRST116 if the row isn't immediately visible (timing/consistency),
+    // which is swallowed as null and incorrectly returns "must open first".
+    const { data: play, error: playErr } = await supabase
       .from('pill_plays')
       .select('id, won, locked_at, submitted_answer')
       .eq('pill_id', pillId)
       .eq('player_id', player.id)
-      .single();
+      .maybeSingle();
+
+    if (playErr) {
+      console.error('pill_plays lookup error:', playErr.message, playErr.code);
+      return res.status(500).json({ success: false, error: 'Failed to verify pill play record' });
+    }
 
     if (!play) {
       return res.status(409).json({ success: false, error: 'You must open this pill first' });
