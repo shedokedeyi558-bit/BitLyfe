@@ -384,7 +384,7 @@ router.post('/signin', async (req, res) => {
  */
 router.post('/register', async (req, res) => {
   try {
-    const { phone, name } = req.body;
+    const { phone, name, password } = req.body;
     const refCode = req.query.ref || req.body.ref || null;
 
     if (!phone) {
@@ -393,51 +393,45 @@ router.post('/register', async (req, res) => {
 
     const normalizedPhone = normalizePhone(phone);
 
+    // Rate limit
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
+
     const { data: existing } = await supabase
       .from('players')
-      .select('id, phone, status')
+      .select('id, phone, name, balance, bonus_balance, status, is_admin, token_version, password_hash')
       .eq('phone', normalizedPhone)
       .maybeSingle();
 
-    if (existing && existing.status === 'banned') {
-      return res.status(403).json({ success: false, error: 'This account has been banned' });
-    }
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(normalizedPhone, { otp, expires: Date.now() + 10 * 60 * 1000 });
-    // SMS OTP disabled — no provider configured
-    // console.log(`[OTP] ${normalizedPhone} → ${otp}`);
-
     if (existing) {
-      // Existing player — return token directly, no OTP step needed
-      const freshPlayer = await supabase
-        .from('players')
-        .select('id, phone, name, balance, bonus_balance, status, is_admin, token_version')
-        .eq('id', existing.id)
-        .single();
-
-      if (freshPlayer.data) {
-        const token = generateToken(freshPlayer.data);
-        return res.json({
-          success: true,
-          data: {
-            token,
-            player: {
-              id: freshPlayer.data.id,
-              phone: freshPlayer.data.phone,
-              name: freshPlayer.data.name,
-              balance: freshPlayer.data.balance,
-              is_admin: freshPlayer.data.is_admin,
-            },
-            message: 'Welcome back!',
-            isExisting: true,
-          },
-        });
+      if (existing.status === 'banned') {
+        return res.status(403).json({ success: false, error: 'This account has been banned' });
       }
 
+      // Returning player — verify password if they provided one and a hash exists
+      if (password && existing.password_hash) {
+        const valid = await bcrypt.compare(String(password), existing.password_hash);
+        if (!valid) {
+          return res.status(401).json({ success: false, error: 'Incorrect password for this number' });
+        }
+      }
+      // If no password provided or no hash stored (old account), let them in — same model as before
+
+      const token = generateToken(existing);
       return res.json({
         success: true,
-        data: { message: 'Welcome back!', isExisting: true, phone: normalizedPhone },
+        data: {
+          token,
+          player: {
+            id: existing.id,
+            phone: existing.phone,
+            name: existing.name,
+            balance: existing.balance,
+            is_admin: existing.is_admin,
+          },
+          message: 'Welcome back!',
+          isExisting: true,
+        },
       });
     }
 
@@ -461,6 +455,9 @@ router.post('/register', async (req, res) => {
     const newUserBonus = settings?.new_user_bonus ?? 0;
     const newReferralCode = await generateReferralCode();
 
+    // Hash password if provided — new players can set a password on first signup
+    const password_hash = password ? await bcrypt.hash(String(password), 10) : null;
+
     const { data: player, error } = await supabase
       .from('players')
       .insert({
@@ -469,6 +466,7 @@ router.post('/register', async (req, res) => {
         balance: newUserBonus,
         is_admin: false,
         referral_code: newReferralCode,
+        password_hash,
       })
       .select()
       .single();
