@@ -405,18 +405,39 @@ router.post('/register', async (req, res) => {
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     otpStore.set(normalizedPhone, { otp, expires: Date.now() + 10 * 60 * 1000 });
-    console.log(`[OTP] ${normalizedPhone} → ${otp}`);
-
-    // Send OTP via Termii — non-blocking, don't fail registration if SMS fails
-    const smsResult = await sendSmsOtp(normalizedPhone, otp);
-    if (!smsResult.success) {
-      console.warn(`[OTP] SMS delivery failed for ${normalizedPhone}: ${smsResult.error}`);
-    }
+    // SMS OTP disabled — no provider configured
+    // console.log(`[OTP] ${normalizedPhone} → ${otp}`);
 
     if (existing) {
+      // Existing player — return token directly, no OTP step needed
+      const freshPlayer = await supabase
+        .from('players')
+        .select('id, phone, name, balance, bonus_balance, status, is_admin, token_version')
+        .eq('id', existing.id)
+        .single();
+
+      if (freshPlayer.data) {
+        const token = generateToken(freshPlayer.data);
+        return res.json({
+          success: true,
+          data: {
+            token,
+            player: {
+              id: freshPlayer.data.id,
+              phone: freshPlayer.data.phone,
+              name: freshPlayer.data.name,
+              balance: freshPlayer.data.balance,
+              is_admin: freshPlayer.data.is_admin,
+            },
+            message: 'Welcome back!',
+            isExisting: true,
+          },
+        });
+      }
+
       return res.json({
         success: true,
-        data: { message: 'Welcome back! OTP sent to your phone.', isExisting: true, phone: normalizedPhone },
+        data: { message: 'Welcome back!', isExisting: true, phone: normalizedPhone },
       });
     }
 
@@ -479,7 +500,18 @@ router.post('/register', async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      data: { message: 'Account created! OTP sent to your phone.', isExisting: false, phone: normalizedPhone },
+      data: {
+        token: generateToken(player),
+        player: {
+          id: player.id,
+          phone: player.phone,
+          name: player.name,
+          balance: player.balance,
+          is_admin: player.is_admin,
+        },
+        message: 'Account created!',
+        isExisting: false,
+      },
     });
   } catch (err) {
     console.error('Register error:', err);
