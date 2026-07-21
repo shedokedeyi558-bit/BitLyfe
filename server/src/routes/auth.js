@@ -829,49 +829,72 @@ router.post('/verify-reset-otp', async (req, res) => {
 });
 
 /**
+/**
  * POST /api/auth/reset-password
- * Reset password using a valid reset token.
- * Increments token_version to invalidate all existing sessions.
+ * Option B — phone-number-is-identity reset.
+ * No OTP required. Player provides phone + new password.
+ * If phone is registered, password is updated and a new JWT is returned.
+ * Security model matches signup (phone number = proof of identity).
+ *
+ * Body: { phone, new_password }
  */
 router.post('/reset-password', async (req, res) => {
   try {
-    const { reset_token, new_password } = req.body;
-    if (!reset_token || !new_password) {
-      return res.status(400).json({ success: false, error: 'reset_token and new_password are required' });
+    const { phone, new_password } = req.body;
+
+    if (!phone || !new_password) {
+      return res.status(400).json({ success: false, error: 'phone and new_password are required' });
     }
 
     if (new_password.length < 6) {
       return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
 
-    const entry = resetTokenStore.get(reset_token);
-    if (!entry || Date.now() > entry.expires) {
-      return res.status(400).json({ success: false, error: 'Invalid or expired reset token' });
-    }
+    const normalizedPhone = normalizePhone(phone);
 
-    // Consume token — single use
-    resetTokenStore.delete(reset_token);
+    // Rate limit
+    const rateLimitResult = checkAuthRateLimit(normalizedPhone);
+    if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
 
-    const { playerId } = entry;
-    const password_hash = await bcrypt.hash(new_password, 10);
-
-    // Fetch current token_version
     const { data: player } = await supabase
       .from('players')
-      .select('token_version')
-      .eq('id', playerId)
-      .single();
+      .select('id, phone, name, balance, status, is_admin, token_version')
+      .eq('phone', normalizedPhone)
+      .maybeSingle();
 
-    const newVersion = (player?.token_version ?? 0) + 1;
+    if (!player) {
+      return res.status(404).json({ success: false, error: 'Phone number not registered' });
+    }
+
+    if (player.status === 'banned') {
+      return res.status(403).json({ success: false, error: 'This account has been banned' });
+    }
+
+    const password_hash = await bcrypt.hash(new_password, 10);
+    // Increment token_version to invalidate all existing sessions
+    const newVersion = (player.token_version ?? 0) + 1;
 
     await supabase
       .from('players')
       .update({ password_hash, token_version: newVersion })
-      .eq('id', playerId);
+      .eq('id', player.id);
+
+    const updatedPlayer = { ...player, token_version: newVersion };
+    const token = generateToken(updatedPlayer);
 
     return res.json({
       success: true,
-      data: { message: 'Password reset successful. Please log in again.' },
+      data: {
+        token,
+        player: {
+          id: player.id,
+          phone: player.phone,
+          name: player.name,
+          balance: player.balance,
+          is_admin: player.is_admin,
+        },
+        message: 'Password reset successful.',
+      },
     });
   } catch (err) {
     console.error('Reset-password error:', err);
