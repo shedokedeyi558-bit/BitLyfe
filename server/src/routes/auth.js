@@ -9,6 +9,48 @@ const router = express.Router();
 // In-memory OTP store (replace with Redis or DB in production)
 const otpStore = new Map();
 
+// ─── SMS HELPER ───────────────────────────────────────────────────────────────
+
+/**
+ * Send an OTP via Termii SMS gateway.
+ * Returns { success: boolean, error?: string }
+ */
+async function sendSmsOtp(phone, otp) {
+  const apiKey = process.env.TERMII_API_KEY;
+  if (!apiKey) {
+    console.warn('[OTP] TERMII_API_KEY not set — SMS not sent. OTP:', otp);
+    return { success: false, error: 'SMS provider not configured' };
+  }
+
+  try {
+    const res = await fetch('https://api.ng.termii.com/api/sms/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: phone,
+        from: 'Bitlyfe',
+        sms: `Your Bitlyfe verification code is: ${otp}. Valid for 10 minutes.`,
+        type: 'plain',
+        channel: 'generic',
+        api_key: apiKey,
+      }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || data.code === 'error' || data.message?.toLowerCase().includes('error')) {
+      console.error('[OTP] Termii error:', JSON.stringify(data));
+      return { success: false, error: data.message || 'SMS failed' };
+    }
+
+    console.log(`[OTP] Sent to ${phone} — Termii message_id: ${data.message_id || 'ok'}`);
+    return { success: true };
+  } catch (err) {
+    console.error('[OTP] Termii fetch error:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 // In-memory store for password-reset OTPs: phone → { otp, expires }
 const resetOtpStore = new Map();
 
@@ -362,8 +404,14 @@ router.post('/register', async (req, res) => {
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    otpStore.set(normalizedPhone, { otp, expires: Date.now() + 5 * 60 * 1000 });
+    otpStore.set(normalizedPhone, { otp, expires: Date.now() + 10 * 60 * 1000 });
     console.log(`[OTP] ${normalizedPhone} → ${otp}`);
+
+    // Send OTP via Termii — non-blocking, don't fail registration if SMS fails
+    const smsResult = await sendSmsOtp(normalizedPhone, otp);
+    if (!smsResult.success) {
+      console.warn(`[OTP] SMS delivery failed for ${normalizedPhone}: ${smsResult.error}`);
+    }
 
     if (existing) {
       return res.json({
@@ -458,11 +506,20 @@ router.post('/verify-otp', async (req, res) => {
     const rateLimitResult = checkAuthRateLimit(normalizedPhone);
     if (rateLimitResult) return res.status(rateLimitResult.status).json(rateLimitResult.body);
 
-    // MVP: accept any 6-digit OTP
-    if (!/^\d{6}$/.test(otp)) {
-      return res.status(400).json({ success: false, error: 'OTP must be a 6-digit number' });
+    // Validate against stored OTP
+    const stored = otpStore.get(normalizedPhone);
+    if (!stored) {
+      return res.status(400).json({ success: false, error: 'No OTP found for this number. Please request a new code.' });
+    }
+    if (Date.now() > stored.expires) {
+      otpStore.delete(normalizedPhone);
+      return res.status(400).json({ success: false, error: 'OTP has expired. Please request a new code.' });
+    }
+    if (stored.otp !== String(otp).trim()) {
+      return res.status(400).json({ success: false, error: 'Incorrect OTP. Please try again.' });
     }
 
+    // OTP valid — consume it (single use)
     otpStore.delete(normalizedPhone);
 
     // Fetch player
@@ -674,9 +731,9 @@ router.post('/forgot-password', async (req, res) => {
 
     if (player) {
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      resetOtpStore.set(normalizedPhone, { otp, expires: Date.now() + 5 * 60 * 1000 });
-      // Reuse existing SMS infra — currently console.log (MVP)
+      resetOtpStore.set(normalizedPhone, { otp, expires: Date.now() + 10 * 60 * 1000 });
       console.log(`[RESET OTP] ${normalizedPhone} → ${otp}`);
+      await sendSmsOtp(normalizedPhone, otp);
     }
 
     return res.json({
