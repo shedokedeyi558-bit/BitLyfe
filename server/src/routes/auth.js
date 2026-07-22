@@ -123,24 +123,52 @@ function isValidEmail(email) {
 }
 
 /**
- * Phone validation helper (Nigerian format or 10-11 digits)
+ * Phone validation helper — accepts any recognizable Nigerian phone format.
+ * Normalization (normalizePhone) must be applied before DB operations.
  */
 function validatePhone(phone) {
   if (!phone) return false;
-  const normalized = phone.trim().replace(/\s+/g, '');
-  return /^\d{10,11}$/.test(normalized) || /^\+234\d{10}$/.test(normalized);
+  const s = phone.trim().replace(/\s+/g, '').replace(/-/g, '');
+  // Accepted input formats (all normalize to +234XXXXXXXXXX):
+  //   +2348105775818  — international with plus
+  //   2348105775818   — international without plus
+  //   08105775818     — local with leading zero (11 digits)
+  //   8105775818      — local without leading zero (10 digits)
+  return (
+    /^\+234\d{10}$/.test(s) ||   // +234 + 10 digits
+    /^234\d{10}$/.test(s)  ||   // 234 + 10 digits (no plus)
+    /^0\d{10}$/.test(s)    ||   // 0 + 10 digits (11 total)
+    /^\d{10}$/.test(s)           // 10 digits (no prefix at all)
+  );
 }
 
 /**
- * Normalize phone number
+ * Normalize phone number to canonical +234XXXXXXXXXX format.
+ * All input variants must produce the same string for the DB UNIQUE constraint
+ * on players.phone to correctly detect duplicates.
  */
 function normalizePhone(phone) {
-  let normalized = phone.trim().replace(/\s+/g, '');
-  // Convert 0 prefix to +234
-  if (normalized.startsWith('0')) {
-    normalized = '+234' + normalized.slice(1);
+  // Strip whitespace, dashes, and parentheses
+  let s = phone.trim().replace(/[\s\-\(\)]/g, '');
+
+  if (s.startsWith('+234')) {
+    // Already canonical — +234XXXXXXXXXX
+    return s;
   }
-  return normalized;
+  if (s.startsWith('234') && s.length === 13) {
+    // International without plus — 2348105775818
+    return '+' + s;
+  }
+  if (s.startsWith('0') && s.length === 11) {
+    // Local with leading zero — 08105775818
+    return '+234' + s.slice(1);
+  }
+  if (/^\d{10}$/.test(s)) {
+    // 10 bare digits, no prefix — 8105775818
+    return '+234' + s;
+  }
+  // Unknown format — return as-is, let validation catch it
+  return s;
 }
 
 /**
