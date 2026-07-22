@@ -472,6 +472,10 @@ router.post('/register', async (req, res) => {
       .single();
 
     if (error) {
+      // Postgres unique constraint violation on phone (code 23505)
+      if (error.code === '23505' && error.message?.includes('phone')) {
+        return res.status(409).json({ success: false, error: 'This number is already registered — sign in instead.' });
+      }
       return res.status(500).json({ success: false, error: 'Failed to create player' });
     }
 
