@@ -491,10 +491,10 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
     const [currentPillForStats] = await getPillsByIds([questionIds[idx]]);
     if (currentPillForStats) {
       const isAnswerCorrect = checkAnswer(currentPillForStats, String(answer));
-      supabase.rpc('increment_pill_stats', {
+      Promise.resolve(supabase.rpc('increment_pill_stats', {
         p_pill_id:    questionIds[idx],
         p_is_correct: isAnswerCorrect,
-      }).catch((err) => console.error('increment_pill_stats error:', err));
+      })).catch((err) => console.error('increment_pill_stats error:', err));
     }
 
     const nextIdx = idx + 1;

@@ -567,10 +567,10 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
 
     // Increment per-question stats atomically (fire-and-forget).
     // Only reached after lock acquired — retries never get here, so no double-counting.
-    supabase.rpc('increment_pill_stats', {
+    Promise.resolve(supabase.rpc('increment_pill_stats', {
       p_pill_id:    questionIds[idx],
       p_is_correct: isCorrect,
-    }).catch((err) => console.error('increment_pill_stats error:', err));
+    })).catch((err) => console.error('increment_pill_stats error:', err));
     const nextIdx = idx + 1;
     const isLastQuestion = nextIdx >= questionIds.length;
 
