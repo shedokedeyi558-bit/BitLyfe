@@ -432,9 +432,41 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
             .select('status, correct_count')
             .eq('id', attemptId)
             .single();
-          const { data: freshPlayer } = await supabase
-            .from('players').select('balance').eq('id', player.id).single();
+          const passed = doneAttempt?.status === 'passed';
+          const prize = passed ? parseFloat(retryPack?.prize || 0) : 0;
           const requiredCorrectRetry = retryPack?.required_correct || questionIds.length;
+
+          // Compensating credit: if passed but no pill_win transaction exists, apply it now
+          let currentBalance = player.balance;
+          if (passed && prize > 0) {
+            const { data: existingTxn } = await supabase
+              .from('transactions')
+              .select('id')
+              .eq('player_id', player.id)
+              .eq('type', 'pill_win')
+              .ilike('description', `%${retryPack?.name || ''}%`)
+              .maybeSingle();
+
+            if (!existingTxn) {
+              console.log(`[special-replay] applying missed pass credit player=${player.id} prize=${prize}`);
+              const { data: fp } = await supabase.from('players').select('balance').eq('id', player.id).single();
+              currentBalance = (fp?.balance || 0) + prize;
+              await supabase.from('players').update({ balance: currentBalance }).eq('id', player.id);
+              await supabase.from('transactions').insert({
+                player_id: player.id, type: 'pill_win', amount: prize,
+                description: `Passed special pack (late credit): ${retryPack?.name}`,
+              });
+              await createNotification(player.id, 'win', 'Special Pack Passed! 🎉',
+                `₦${prize.toLocaleString()} credited.`).catch(() => {});
+            } else {
+              const { data: fp } = await supabase.from('players').select('balance').eq('id', player.id).single();
+              currentBalance = fp?.balance ?? currentBalance;
+            }
+          } else {
+            const { data: fp } = await supabase.from('players').select('balance').eq('id', player.id).single();
+            currentBalance = fp?.balance ?? currentBalance;
+          }
+
           return res.json({
             success: true,
             idempotent_replay: true,
@@ -444,8 +476,8 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
             correct_count: doneAttempt?.correct_count ?? 0,
             required_correct: requiredCorrectRetry,
             total_questions: questionIds.length,
-            prize_credited: doneAttempt?.status === 'passed' ? parseFloat(retryPack?.prize || 0) : 0,
-            newBalance: freshPlayer?.balance ?? player.balance,
+            prize_credited: prize,
+            newBalance: currentBalance,
           });
         }
 
