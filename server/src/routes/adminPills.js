@@ -805,8 +805,12 @@ router.get('/packs/:packId/pills', async (req, res) => {
     }
 
     // Compute correct_rate per pill and optionally sort by it
+    // Also add `timer` alias alongside `timer_seconds` — the player-facing API uses
+    // `timer` and the admin frontend may read either name. Both fields are returned
+    // so the frontend works regardless of which it checks.
     let result = (pills || []).map((p) => ({
       ...p,
+      timer: p.timer_seconds,           // alias for frontend compatibility
       correct_rate: p.times_answered > 0
         ? parseFloat((p.times_correct / p.times_answered).toFixed(4))
         : null,
@@ -892,6 +896,7 @@ router.get('/', async (req, res) => {
 
     let result = (data || []).map((p) => ({
       ...p,
+      timer: p.timer_seconds,           // alias for frontend compatibility
       correct_rate: p.times_answered > 0
         ? parseFloat((p.times_correct / p.times_answered).toFixed(4))
         : null,
