@@ -566,7 +566,17 @@ router.post('/submit', auth, async (req, res) => {
     const player = req.player;
 
     // ── DIAGNOSTIC LOGGING ────────────────────────────────────────────────
-    console.log(`[SUBMIT] player=${player.id} pillId=${pillId}`);
+    console.log('[submit] pillId:', pillId, 'playerId:', player.id);
+
+    // Log exact pill_plays row state at the moment submit fires
+    const { data: diagRow, error: diagErr } = await supabase
+      .from('pill_plays')
+      .select('id, pill_id, player_id, locked_at, submitted_answer, created_at')
+      .eq('pill_id', pillId)
+      .eq('player_id', player.id)
+      .maybeSingle();
+    console.log('[submit] pill_plays row:', JSON.stringify(diagRow), 'error:', diagErr?.message);
+    console.log('[submit] answer received:', answer);
 
     if (!pillId || answer === undefined || answer === null) {
       return res.status(400).json({ success: false, error: 'pillId and answer are required' });
