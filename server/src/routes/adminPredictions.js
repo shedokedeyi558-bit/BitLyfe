@@ -8,6 +8,19 @@ const router = express.Router();
 // Apply admin auth to all routes in this file
 router.use(adminAuth);
 
+// ─── ROUTE ORDER RULES ────────────────────────────────────────────────────────
+// Express matches routes in registration order. Param routes (/:id) are
+// catch-alls — a literal route added AFTER a param route sharing the same
+// prefix will be silently shadowed and return "Route not found".
+//
+// REQUIRED ORDER for this file:
+//   1. Literal routes: /, /audit-log, /stats  (GET, POST)
+//   2. Param routes:   /:id, /:id/*, /:id/mark-answer, etc.
+//
+// ⚠️  NEVER append a new literal route at the bottom — it will be shadowed
+//     by /:id. Add new literals ABOVE the first /:id route (currently GET /:id).
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * GET /api/admin/predictions
  * List all predictions (paginated)

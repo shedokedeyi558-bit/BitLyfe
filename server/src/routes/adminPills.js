@@ -7,6 +7,21 @@ const router = express.Router();
 // Apply admin auth to all routes in this file
 router.use(adminAuth);
 
+// ─── ROUTE ORDER RULES ────────────────────────────────────────────────────────
+// Express matches routes in registration order. Param routes (:packId, :id)
+// are catch-alls that swallow any literal string in that position.
+//
+// REQUIRED ORDER for this file:
+//   1. Literal /packs/* routes (GET /packs, GET /packs/attempt-stats, etc.)
+//   2. Param /packs/:packId/* routes (PUT /packs/:packId, GET /packs/:packId/pills)
+//   3. Literal top-level routes (GET /stats, GET /, POST /)
+//   4. Param top-level routes (PATCH /:id, PUT /:id, DELETE /:id)
+//
+// ⚠️  NEVER append a new literal route at the bottom of this file.
+//     Add new /packs/* literals before the first /packs/:packId route.
+//     Add new /* literals before the first /:id route.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ─── PACK ROUTES (must come before /:id routes) ───────────────────────────────
 
 /**
