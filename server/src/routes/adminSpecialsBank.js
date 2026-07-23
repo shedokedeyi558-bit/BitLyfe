@@ -30,6 +30,69 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 router.use(adminAuth);
 
+// ─── ROUTE ORDER RULES ────────────────────────────────────────────────────────
+// Literal routes (/library, /library/import, /library/copy-to-pack) must come
+// BEFORE param routes (/packs/:packId, /library/:id) to avoid shadowing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/specials-bank/packs/:packId
+ * Returns the pack details + full pill bank for the Manage Bank screen.
+ * Delegates to adminPills logic — Specials and standard packs use the same pills table.
+ */
+router.get('/packs/:packId', async (req, res) => {
+  try {
+    const { packId } = req.params;
+
+    const { data: pack, error: packErr } = await supabase
+      .from('pill_packs')
+      .select('*')
+      .eq('id', packId)
+      .single();
+
+    if (packErr || !pack) {
+      return res.status(404).json({ success: false, error: 'Pack not found' });
+    }
+
+    const { data: pills } = await supabase
+      .from('pills')
+      .select('id, question, format, options, correct_answer, timer_seconds, color, case_sensitive, entry_fee, prize, status, deleted_at, times_answered, times_correct, created_at')
+      .eq('pack_id', packId)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true });
+
+    const availableCount = (pills || []).filter((p) => p.status === 'available').length;
+    const qc = pack.question_count;
+    let bankRatio = null;
+    let lowEntropyWarning = null;
+    if (qc && availableCount > 0) {
+      bankRatio = parseFloat((availableCount / qc).toFixed(2));
+    }
+    if (qc && availableCount < qc * 3) {
+      lowEntropyWarning = availableCount < qc
+        ? `Bank (${availableCount}) is below question_count (${qc}) — pack cannot start.`
+        : `Bank (${availableCount}) is less than 3× question_count (${qc}). Recommend ${qc * 3}+ questions.`;
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        pack: {
+          ...pack,
+          available_count: availableCount,
+          bank_ratio: bankRatio,
+          low_entropy_warning: lowEntropyWarning,
+        },
+        pills: pills || [],
+        total: (pills || []).length,
+      },
+    });
+  } catch (err) {
+    console.error('Get specials pack error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch pack' });
+  }
+});
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 /** Validate and normalise a single raw question row from CSV or JSON import. */
