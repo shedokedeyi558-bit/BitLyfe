@@ -5,7 +5,7 @@ const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { checkAnswer } = require('../services/gameLogic');
-const { deductEntryFee } = require('../services/billing');
+const { deductEntryFee, refundEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
@@ -500,11 +500,21 @@ router.post('/open', idempotency(), auth, async (req, res) => {
     }
 
     // Create pill_play record (marks this player as having opened this pill)
-    await supabase.from('pill_plays').insert({
+    const { error: insertPlayErr } = await supabase.from('pill_plays').insert({
       pill_id: pillId,
       player_id: player.id,
       won: false,
     });
+
+    if (insertPlayErr) {
+      console.error('pill_plays insert error:', insertPlayErr.message, insertPlayErr.code);
+      // If it's a unique constraint violation, the row already exists (idempotent open) — OK
+      if (insertPlayErr.code !== '23505') {
+        // Real insert failure — refund and abort
+        try { await refundEntryFee(player.id, entryFee, pillId); } catch {}
+        return res.status(500).json({ success: false, error: 'Failed to record pill open. Your payment has been refunded.' });
+      }
+    }
 
     // Trigger referral first-game check (fire-and-forget — never blocks the response)
     checkReferralCompletion(player.id, 'game').catch(() => {});
@@ -555,6 +565,9 @@ router.post('/submit', auth, async (req, res) => {
     const { pillId, answer } = req.body;
     const player = req.player;
 
+    // ── DIAGNOSTIC LOGGING ────────────────────────────────────────────────
+    console.log(`[SUBMIT] player=${player.id} pillId=${pillId}`);
+
     if (!pillId || answer === undefined || answer === null) {
       return res.status(400).json({ success: false, error: 'pillId and answer are required' });
     }
@@ -571,21 +584,33 @@ router.post('/submit', auth, async (req, res) => {
     }
 
     // Verify this player opened this pill — use maybeSingle() not single()
-    // .single() throws PGRST116 if the row isn't immediately visible (timing/consistency),
-    // which is swallowed as null and incorrectly returns "must open first".
-    const { data: play, error: playErr } = await supabase
-      .from('pill_plays')
-      .select('id, won, locked_at, submitted_answer')
-      .eq('pill_id', pillId)
-      .eq('player_id', player.id)
-      .maybeSingle();
+    // Retry up to 3 times with 200ms delay to handle Supabase read-after-write lag
+    // (pill_plays row just inserted by open() may not be immediately visible to reads)
+    let play = null;
+    let playErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await supabase
+        .from('pill_plays')
+        .select('id, won, locked_at, submitted_answer')
+        .eq('pill_id', pillId)
+        .eq('player_id', player.id)
+        .maybeSingle();
+      play = result.data;
+      playErr = result.error;
+      if (play || playErr) break; // row found or real error — stop retrying
+      // Row not found yet — brief wait for write to propagate
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    console.log(`[SUBMIT] pill_plays (after retry): found=${!!play} playErr=${playErr?.message}`);
 
     if (playErr) {
-      console.error('pill_plays lookup error:', playErr.message, playErr.code);
+      console.error('pill_plays DB error:', playErr.message, playErr.code);
       return res.status(500).json({ success: false, error: 'Failed to verify pill play record' });
     }
 
     if (!play) {
+      console.error('[SUBMIT] no pill_plays row found after 3 retries — open() may have failed silently');
       return res.status(409).json({ success: false, error: 'You must open this pill first' });
     }
 
