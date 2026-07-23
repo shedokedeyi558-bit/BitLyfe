@@ -532,8 +532,8 @@ router.post('/register', async (req, res) => {
     await supabase.from('notifications').insert({
       player_id: player.id,
       type: 'announcement',
-      title: 'Welcome, Scholar! 🎓',
-      message: "Time to get rich. You're smart enough to win any challenge thrown at you. Browse packs, participate in live events, and start stacking wins.",
+      title: 'Welcome to BitLyfe! 🎉',
+      message: 'Answer your first question and get paid instantly. Browse packs, join live prediction events, and start stacking wins.',
       read: false,
     }).catch(() => {}); // fire-and-forget — never block signup on notification failure
 
