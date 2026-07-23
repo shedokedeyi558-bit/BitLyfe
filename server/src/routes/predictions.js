@@ -301,14 +301,23 @@ router.post('/submit', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'predictionId and answer are required' });
     }
 
-    // Fetch participation record — use maybeSingle() so a missing row returns null
-    // instead of a query error, giving the player the correct "not participated" message.
-    const { data: participation, error: partErr } = await supabase
-      .from('prediction_participations')
-      .select('*')
-      .eq('prediction_id', predictionId)
-      .eq('player_id', player.id)
-      .maybeSingle();
+    // Fetch participation record — use maybeSingle() so a missing row returns null.
+    // Retry up to 3 times with 200ms delay to handle Supabase read-after-write lag
+    // (participation row just inserted by /enter may not be immediately visible).
+    let participation = null;
+    let partErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await supabase
+        .from('prediction_participations')
+        .select('*')
+        .eq('prediction_id', predictionId)
+        .eq('player_id', player.id)
+        .maybeSingle();
+      participation = result.data;
+      partErr = result.error;
+      if (participation || partErr) break;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 200));
+    }
 
     if (partErr) {
       console.error('Submit participation lookup error:', partErr);
