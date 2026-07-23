@@ -610,6 +610,144 @@ router.get('/stats', async (req, res) => {
   }
 });
 
+// ─── ATTEMPT STATS ────────────────────────────────────────────────────────────
+// ⚠️  ROUTE ORDER CRITICAL: This literal path GET /packs/attempt-stats MUST be
+// registered BEFORE GET /packs/:packId/pills. Express matches routes in
+// registration order — if /:packId comes first, "attempt-stats" is captured
+// as packId and the handler returns 404 (Pack not found) or the server's
+// catch-all returns "Route not found". Same class of bug as adminPredictions.js
+// /stats vs /:id. Do not move this block below any /packs/:packId route.
+
+/**
+ * GET /api/admin/pills/packs/attempt-stats
+ * Real-time counts of in-progress, won (passed), and lost (failed) attempts.
+ *
+ * Query params:
+ *   ?pack_id=<uuid>   — stats for a single pack (optional)
+ *                       omit to get aggregated stats across ALL active packs
+ */
+router.get('/packs/attempt-stats', async (req, res) => {
+  try {
+    const { pack_id } = req.query;
+
+    let targetPackIds = null;
+
+    if (pack_id) {
+      const { data: pack, error: packErr } = await supabase
+        .from('pill_packs')
+        .select('id, name, required_correct, pack_type, is_vip')
+        .eq('id', pack_id)
+        .single();
+
+      if (packErr || !pack) {
+        return res.status(404).json({ success: false, error: 'Pack not found' });
+      }
+
+      targetPackIds = [pack_id];
+    } else {
+      const { data: packs, error: packsErr } = await supabase
+        .from('pill_packs')
+        .select('id')
+        .eq('status', 'active')
+        .or('pack_type.eq.special,is_vip.eq.true');
+
+      if (packsErr) {
+        return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
+      }
+
+      targetPackIds = (packs || []).map((p) => p.id);
+    }
+
+    if (targetPackIds.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          totals: { in_progress: 0, passed: 0, failed: 0, total_completed: 0, win_rate: null },
+          by_pack: [],
+        },
+      });
+    }
+
+    const { data: attempts, error: attemptsErr } = await supabase
+      .from('special_attempts')
+      .select('pack_id, status')
+      .in('pack_id', targetPackIds);
+
+    if (attemptsErr) {
+      return res.status(500).json({ success: false, error: 'Failed to fetch attempt data' });
+    }
+
+    const packMetaResults = await Promise.all(
+      targetPackIds.map((pid) =>
+        supabase
+          .from('pill_packs')
+          .select('id, name, required_correct, question_count')
+          .eq('id', pid)
+          .single()
+          .then(({ data }) => data)
+      )
+    );
+
+    const packMeta = {};
+    for (const p of packMetaResults.filter(Boolean)) packMeta[p.id] = p;
+
+    const byPack = {};
+    for (const id of targetPackIds) {
+      byPack[id] = { in_progress: 0, passed: 0, failed: 0 };
+    }
+
+    for (const attempt of attempts || []) {
+      const bucket = byPack[attempt.pack_id];
+      if (!bucket) continue;
+      if (attempt.status === 'in_progress') bucket.in_progress++;
+      else if (attempt.status === 'passed')  bucket.passed++;
+      else if (attempt.status === 'failed')  bucket.failed++;
+    }
+
+    const byPackResult = targetPackIds.map((id) => {
+      const counts = byPack[id];
+      const meta = packMeta[id] || {};
+      const total_completed = counts.passed + counts.failed;
+      const win_rate = total_completed > 0
+        ? parseFloat((counts.passed / total_completed).toFixed(4))
+        : null;
+
+      return {
+        pack_id: id,
+        pack_name: meta.name || null,
+        required_correct: meta.required_correct || null,
+        question_count: meta.question_count || null,
+        in_progress: counts.in_progress,
+        passed: counts.passed,
+        failed: counts.failed,
+        total_completed,
+        win_rate,
+      };
+    });
+
+    const totals = byPackResult.reduce(
+      (acc, row) => {
+        acc.in_progress += row.in_progress;
+        acc.passed      += row.passed;
+        acc.failed      += row.failed;
+        return acc;
+      },
+      { in_progress: 0, passed: 0, failed: 0 }
+    );
+
+    const total_completed = totals.passed + totals.failed;
+    totals.total_completed = total_completed;
+    totals.win_rate = total_completed > 0
+      ? parseFloat((totals.passed / total_completed).toFixed(4))
+      : null;
+
+    return res.json({ success: true, data: { totals, by_pack: byPackResult } });
+  } catch (err) {
+    console.error('Attempt stats error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch attempt stats' });
+  }
+});
+
 /**
  * GET /api/admin/pills/packs/:packId/pills
  * List all non-deleted pills for a specific pack (paginated, admin view).
@@ -1000,178 +1138,6 @@ router.delete('/:id', async (req, res) => {
   } catch (err) {
     console.error('Delete pill error:', err);
     return res.status(500).json({ success: false, error: 'Failed to delete pill' });
-  }
-});
-
-// ─── ATTEMPT STATS ────────────────────────────────────────────────────────────
-
-/**
- * GET /api/admin/pills/packs/attempt-stats
- * Real-time counts of in-progress, won (passed), and lost (failed) attempts.
- *
- * Query params:
- *   ?pack_id=<uuid>   — stats for a single pack (optional)
- *                       omit to get aggregated stats across ALL active packs
- *
- * Win  = special_attempts.status = 'passed'
- * Loss = special_attempts.status = 'failed'
- * Live = special_attempts.status = 'in_progress'
- *
- * Per-pack breakdown is always included so the admin can see which packs
- * are attracting the most traffic or have the worst win rate.
- *
- * Response:
- * {
- *   success: true,
- *   data: {
- *     totals: { in_progress, passed, failed, total_completed, win_rate },
- *     by_pack: [
- *       {
- *         pack_id, pack_name, required_correct,
- *         in_progress, passed, failed, total_completed, win_rate
- *       }
- *     ]
- *   }
- * }
- */
-router.get('/packs/attempt-stats', async (req, res) => {
-  try {
-    const { pack_id } = req.query;
-
-    // ── 1. Determine which pack IDs to query ──────────────────────────────
-    let targetPackIds = null; // null = all packs
-
-    if (pack_id) {
-      // Single pack requested — confirm it exists
-      const { data: pack, error: packErr } = await supabase
-        .from('pill_packs')
-        .select('id, name, required_correct, pack_type, is_vip')
-        .eq('id', pack_id)
-        .single();
-
-      if (packErr || !pack) {
-        return res.status(404).json({ success: false, error: 'Pack not found' });
-      }
-
-      targetPackIds = [pack_id];
-    } else {
-      // All active special/VIP packs
-      const { data: packs, error: packsErr } = await supabase
-        .from('pill_packs')
-        .select('id')
-        .eq('status', 'active')
-        .or('pack_type.eq.special,is_vip.eq.true');
-
-      if (packsErr) {
-        return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
-      }
-
-      targetPackIds = (packs || []).map((p) => p.id);
-    }
-
-    if (targetPackIds.length === 0) {
-      return res.json({
-        success: true,
-        data: {
-          totals: { in_progress: 0, passed: 0, failed: 0, total_completed: 0, win_rate: null },
-          by_pack: [],
-        },
-      });
-    }
-
-    // ── 2. Fetch all attempt rows for these packs in one query ────────────
-    // We only need pack_id and status — correct_count is already encoded in status
-    // (passed = met required_correct, failed = did not).
-    const { data: attempts, error: attemptsErr } = await supabase
-      .from('special_attempts')
-      .select('pack_id, status')
-      .in('pack_id', targetPackIds);
-
-    if (attemptsErr) {
-      return res.status(500).json({ success: false, error: 'Failed to fetch attempt data' });
-    }
-
-    // ── 3. Fetch pack metadata for the breakdown labels ───────────────────
-    // Use parallel .eq() queries — .in('id', uuidArray) silently returns empty for UUID PKs
-    const packMetaResults = await Promise.all(
-      targetPackIds.map((pid) =>
-        supabase
-          .from('pill_packs')
-          .select('id, name, required_correct, question_count')
-          .eq('id', pid)
-          .single()
-          .then(({ data }) => data)
-      )
-    );
-
-    const packMeta = {};
-    for (const p of packMetaResults.filter(Boolean)) packMeta[p.id] = p;
-
-    // ── 4. Aggregate counts ───────────────────────────────────────────────
-    const byPack = {};
-
-    // Initialise all packs with zeros (even those with no attempts yet)
-    for (const id of targetPackIds) {
-      byPack[id] = { in_progress: 0, passed: 0, failed: 0 };
-    }
-
-    for (const attempt of attempts || []) {
-      const bucket = byPack[attempt.pack_id];
-      if (!bucket) continue;
-      if (attempt.status === 'in_progress') bucket.in_progress++;
-      else if (attempt.status === 'passed')  bucket.passed++;
-      else if (attempt.status === 'failed')  bucket.failed++;
-    }
-
-    // ── 5. Build per-pack response rows ───────────────────────────────────
-    const byPackResult = targetPackIds.map((id) => {
-      const counts = byPack[id];
-      const meta = packMeta[id] || {};
-      const total_completed = counts.passed + counts.failed;
-      const win_rate = total_completed > 0
-        ? parseFloat((counts.passed / total_completed).toFixed(4))
-        : null;
-
-      return {
-        pack_id: id,
-        pack_name: meta.name || null,
-        required_correct: meta.required_correct || null,
-        question_count: meta.question_count || null,
-        in_progress: counts.in_progress,
-        passed: counts.passed,
-        failed: counts.failed,
-        total_completed,
-        win_rate,
-      };
-    });
-
-    // ── 6. Roll up totals ─────────────────────────────────────────────────
-    const totals = byPackResult.reduce(
-      (acc, row) => {
-        acc.in_progress += row.in_progress;
-        acc.passed      += row.passed;
-        acc.failed      += row.failed;
-        return acc;
-      },
-      { in_progress: 0, passed: 0, failed: 0 }
-    );
-
-    const total_completed = totals.passed + totals.failed;
-    totals.total_completed = total_completed;
-    totals.win_rate = total_completed > 0
-      ? parseFloat((totals.passed / total_completed).toFixed(4))
-      : null;
-
-    return res.json({
-      success: true,
-      data: {
-        totals,
-        by_pack: byPackResult,
-      },
-    });
-  } catch (err) {
-    console.error('Attempt stats error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to fetch attempt stats' });
   }
 });
 
