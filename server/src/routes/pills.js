@@ -654,7 +654,10 @@ router.post('/submit', auth, async (req, res) => {
       const lockedAnswer = freshPlay?.submitted_answer ?? play.submitted_answer;
 
       if (lockedAnswer !== null && lockedAnswer !== undefined && String(lockedAnswer) === String(answer)) {
-        // Idempotent retry — re-derive and return the same result
+        // Idempotent retry — the lock was already set (answer was recorded).
+        // Re-derive correctness and check whether the balance was actually credited.
+        // If won=false but answer is correct, the original request crashed before
+        // completing the credit step — apply it now so the player isn't shorted.
         const correct = checkAnswer(pill, String(answer));
         let prize = parseFloat(pill.prize);
         if (pill.pack_id) {
@@ -662,8 +665,28 @@ router.post('/submit', auth, async (req, res) => {
             .from('pill_packs').select('prize').eq('id', pill.pack_id).single();
           if (pack?.prize !== null && pack?.prize !== undefined) prize = parseFloat(pack.prize);
         }
-        const { data: freshPlayer } = await supabase
-          .from('players').select('balance').eq('id', player.id).single();
+
+        let currentBalance = player.balance;
+
+        if (correct && freshPlay && !freshPlay.won) {
+          // Win was not recorded — apply the credit now (compensating action)
+          console.log(`[submit] idempotent: applying missed win credit player=${player.id} prize=${prize}`);
+          const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', player.id).single();
+          const newBalance = (freshPlayer?.balance || 0) + prize;
+          await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
+          await supabase.from('transactions').insert({
+            player_id: player.id,
+            type: 'pill_win',
+            amount: prize,
+            description: `Won pill (late credit): ${pill.question.substring(0, 50)}`,
+          });
+          await supabase.from('pill_plays').update({ won: true }).eq('id', freshPlay.id);
+          await createNotification(player.id, 'win', 'You won! 🎉', `₦${prize.toLocaleString()} has been credited to your wallet`).catch(() => {});
+          currentBalance = newBalance;
+        } else {
+          const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', player.id).single();
+          currentBalance = freshPlayer?.balance ?? player.balance;
+        }
 
         return res.json({
           success: true,
@@ -672,7 +695,7 @@ router.post('/submit', auth, async (req, res) => {
             won: correct,
             correctAnswer: pill.correct_answer,
             prize: correct ? prize : 0,
-            newBalance: freshPlayer?.balance ?? player.balance,
+            newBalance: currentBalance,
             locked: true,
             locked_at: freshPlay?.locked_at ?? play.locked_at,
           },
