@@ -51,15 +51,21 @@ router.get('/packs/:packId/questions', async (req, res) => {
       .single();
 
     if (packErr || !pack) {
-      return res.status(404).json({ success: false, error: 'Pack not found' });
+      console.error('[specials-bank/questions] pack lookup failed:', packErr?.message, 'packId:', packId);
+      return res.status(404).json({ success: false, error: 'Pack not found', detail: packErr?.message });
     }
 
-    const { data: questions } = await supabase
+    const { data: questions, error: qErr } = await supabase
       .from('pills')
       .select('id, question, format, options, correct_answer, timer_seconds, color, case_sensitive, status, times_answered, times_correct, created_at')
       .eq('pack_id', packId)
       .is('deleted_at', null)
       .order('created_at', { ascending: true });
+
+    if (qErr) {
+      console.error('[specials-bank/questions] pills query failed:', qErr?.message);
+      return res.status(500).json({ success: false, error: 'Failed to fetch questions', detail: qErr?.message });
+    }
 
     const qs = (questions || []).map((q) => ({
       id: q.id,
