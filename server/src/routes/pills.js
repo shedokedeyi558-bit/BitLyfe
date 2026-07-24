@@ -666,9 +666,7 @@ router.post('/submit', auth, async (req, res) => {
 
       if (lockedAnswer !== null && lockedAnswer !== undefined && String(lockedAnswer) === String(answer)) {
         // Idempotent retry — the lock was already set (answer was recorded).
-        // Re-derive correctness and check whether the balance was actually credited.
-        // If won=false but answer is correct, the original request crashed before
-        // completing the credit step — apply it now so the player isn't shorted.
+        // Run ALL side effects that may have been skipped if the original request crashed.
         const correct = checkAnswer(pill, String(answer));
         let prize = parseFloat(pill.prize);
         if (pill.pack_id) {
@@ -679,8 +677,11 @@ router.post('/submit', auth, async (req, res) => {
 
         let currentBalance = player.balance;
 
+        // (a) pills.status → 'played'  (already guaranteed by code below, but set it here too)
+        await supabase.from('pills').update({ status: 'played' }).eq('id', pillId).catch(() => {});
+
         if (correct && freshPlay && !freshPlay.won) {
-          // Win was not recorded — apply the credit now (compensating action)
+          // (b/c/e/f) Win was not recorded — apply credit, mark won, record transaction, notify
           console.log(`[submit] idempotent: applying missed win credit player=${player.id} prize=${prize}`);
           const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', player.id).single();
           const newBalance = (freshPlayer?.balance || 0) + prize;
@@ -692,15 +693,30 @@ router.post('/submit', auth, async (req, res) => {
             description: `Won pill (late credit): ${pill.question.substring(0, 50)}`,
           });
           await supabase.from('pill_plays').update({ won: true }).eq('id', freshPlay.id);
-          // Also mark the pill as globally played so other players can't see/attempt it
-          await supabase.from('pills').update({ status: 'played' }).eq('id', pillId);
           await createNotification(player.id, 'win', 'You won! 🎉', `₦${prize.toLocaleString()} has been credited to your wallet`).catch(() => {});
           currentBalance = newBalance;
         } else {
           const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', player.id).single();
           currentBalance = freshPlayer?.balance ?? player.balance;
-          // Ensure pill is marked played even on a wrong-answer replay or already-won replay
-          await supabase.from('pills').update({ status: 'played' }).eq('id', pillId).catch(() => {});
+        }
+
+        // (d) Stats increment — fire-and-forget, may have been skipped on original crash
+        Promise.resolve(supabase.rpc('increment_pill_stats', {
+          p_pill_id:    pillId,
+          p_is_correct: correct,
+        })).catch(() => {});
+
+        // (g) Pack auto-deactivate — check if this was the last pill
+        if (pill.pack_id) {
+          const { count: totalCount } = await supabase
+            .from('pills').select('id', { count: 'exact', head: true })
+            .eq('pack_id', pill.pack_id).neq('status', 'expired');
+          const { count: playedCount } = await supabase
+            .from('pills').select('id', { count: 'exact', head: true })
+            .eq('pack_id', pill.pack_id).eq('status', 'played');
+          if (totalCount > 0 && playedCount >= totalCount) {
+            await supabase.from('pill_packs').update({ status: 'inactive' }).eq('id', pill.pack_id).catch(() => {});
+          }
         }
 
         return res.json({

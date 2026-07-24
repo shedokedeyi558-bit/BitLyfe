@@ -494,6 +494,12 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
           const passed = doneAttempt?.status === 'passed';
           const prize = passed ? parseFloat(retryPack?.prize || 0) : 0;
 
+          // (d) Per-question stats — fire-and-forget, may have been skipped on crash
+          Promise.resolve(supabase.rpc('increment_pill_stats', {
+            p_pill_id:    questionIds[idx],
+            p_is_correct: isCorrect,
+          })).catch(() => {});
+
           // Compensating credit: if passed but no pill_win transaction exists, apply credit now
           let currentBalance = freshPlayer?.balance ?? player.balance;
           if (passed && prize > 0) {
