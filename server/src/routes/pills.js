@@ -398,6 +398,17 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'Pill has expired' });
     }
 
+    // Re-verify pill is still available — another player may have consumed it
+    // since the client loaded the pack list. This is the server-side guard that
+    // prevents charging for a pill already consumed by someone else.
+    if (pill.status === 'played') {
+      return res.status(409).json({
+        success: false,
+        code: 'PILL_ALREADY_PLAYED',
+        error: 'This question has already been answered by another player. Please refresh to see available questions.',
+      });
+    }
+
     // Check if this player already has a pill_plays row for this pill
     const { data: existingPlay } = await supabase
       .from('pill_plays')
