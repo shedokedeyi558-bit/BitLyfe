@@ -692,11 +692,15 @@ router.post('/submit', auth, async (req, res) => {
             description: `Won pill (late credit): ${pill.question.substring(0, 50)}`,
           });
           await supabase.from('pill_plays').update({ won: true }).eq('id', freshPlay.id);
+          // Also mark the pill as globally played so other players can't see/attempt it
+          await supabase.from('pills').update({ status: 'played' }).eq('id', pillId);
           await createNotification(player.id, 'win', 'You won! 🎉', `₦${prize.toLocaleString()} has been credited to your wallet`).catch(() => {});
           currentBalance = newBalance;
         } else {
           const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', player.id).single();
           currentBalance = freshPlayer?.balance ?? player.balance;
+          // Ensure pill is marked played even on a wrong-answer replay or already-won replay
+          await supabase.from('pills').update({ status: 'played' }).eq('id', pillId).catch(() => {});
         }
 
         return res.json({
