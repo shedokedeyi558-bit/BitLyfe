@@ -36,6 +36,128 @@ router.use(adminAuth);
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * GET /api/admin/specials-bank/packs/:packId/questions
+ * Returns the pack's question bank in the shape the Manage Bank page expects.
+ * ⚠️  Must stay BEFORE GET /packs/:packId — route order rule.
+ */
+router.get('/packs/:packId/questions', async (req, res) => {
+  try {
+    const { packId } = req.params;
+
+    const { data: pack, error: packErr } = await supabase
+      .from('pill_packs')
+      .select('id, name, category, question_count, pack_type, is_vip')
+      .eq('id', packId)
+      .single();
+
+    if (packErr || !pack) {
+      return res.status(404).json({ success: false, error: 'Pack not found' });
+    }
+
+    const { data: questions } = await supabase
+      .from('pills')
+      .select('id, question, format, options, correct_answer, timer_seconds, color, case_sensitive, status, times_answered, times_correct, created_at')
+      .eq('pack_id', packId)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true });
+
+    const qs = (questions || []).map((q) => ({
+      id: q.id,
+      question: q.question,
+      format: q.format,
+      options: q.options || null,
+      correct_answer: q.correct_answer,
+      timer: q.timer_seconds,
+      times_shown: q.times_answered || 0,
+      times_correct: q.times_correct || 0,
+      correct_rate: q.times_answered > 0
+        ? parseFloat((q.times_correct / q.times_answered).toFixed(4))
+        : 0,
+      status: q.status,
+      created_at: q.created_at,
+    }));
+
+    const bankSize = qs.filter((q) => q.status === 'available').length;
+    const qc = pack.question_count || null;
+
+    return res.json({
+      success: true,
+      data: {
+        pack: {
+          id: pack.id,
+          name: pack.name,
+          category: pack.category,
+          question_count: qc,
+        },
+        questions: qs,
+        stats: {
+          total: qs.length,
+          bank_size: bankSize,
+          coverage_ratio: qc && bankSize > 0 ? parseFloat((bankSize / qc).toFixed(4)) : 0,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Get specials questions error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch questions' });
+  }
+});
+
+/**
+ * POST /api/admin/specials-bank/packs/:packId/bulk-add
+ * Add multiple questions to a pack bank in one call.
+ * Body: { questions: [{ question, format, options?, correct_answer, timer?, color? }] }
+ * ⚠️  Must stay BEFORE GET /packs/:packId — route order rule.
+ */
+router.post('/packs/:packId/bulk-add', async (req, res) => {
+  try {
+    const pack = await requireSpecialsPack(req.params.packId).catch((err) => {
+      res.status(err.status || 500).json({ success: false, error: err.message });
+      return null;
+    });
+    if (!pack) return;
+
+    const { questions } = req.body;
+    if (!Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ success: false, error: 'questions array is required' });
+    }
+
+    const normalised = [];
+    for (let i = 0; i < questions.length; i++) {
+      const result = normaliseRow(questions[i], i);
+      if (result.error) return res.status(400).json({ success: false, error: result.error });
+      normalised.push(result);
+    }
+
+    const resolvedFee   = pack.entry_fee   !== null ? Number(pack.entry_fee)  : 0;
+    const resolvedPrize = pack.prize        !== null ? Number(pack.prize)      : 0;
+
+    const toInsert = normalised.map((q) => ({
+      admin_id:       req.admin?.id || null,
+      pack_id:        pack.id,
+      question:       q.question,
+      format:         q.format,
+      options:        q.options,
+      correct_answer: q.correct_answer,
+      case_sensitive: q.case_sensitive,
+      timer_seconds:  q.timer_seconds,
+      color:          q.color,
+      entry_fee:      resolvedFee,
+      prize:          resolvedPrize,
+      status:         'available',
+    }));
+
+    const { data, error } = await supabase.from('pills').insert(toInsert).select();
+    if (error) return res.status(500).json({ success: false, error: 'Bulk add failed: ' + error.message });
+
+    return res.status(201).json({ success: true, data: { added: data.length, questions: data } });
+  } catch (err) {
+    console.error('Bulk add questions error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to add questions' });
+  }
+});
+
+/**
  * GET /api/admin/specials-bank/packs/:packId
  * Returns the pack details + full pill bank for the Manage Bank screen.
  * Delegates to adminPills logic — Specials and standard packs use the same pills table.
