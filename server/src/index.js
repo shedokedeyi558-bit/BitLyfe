@@ -30,6 +30,12 @@ const PORT = process.env.PORT || 5000;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
+// Trust the Railway/Vercel reverse proxy — required so express-rate-limit
+// reads the real client IP from X-Forwarded-For instead of throwing a
+// ValidationError (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR).
+// '1' = trust one hop (the Railway load balancer immediately in front of us).
+app.set('trust proxy', 1);
+
 app.use(
   cors({
     origin: [
