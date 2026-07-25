@@ -23,6 +23,77 @@ const router = express.Router();
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+/**
+ * Check player's daily and weekly spend limits.
+ * Returns { allowed: boolean, reason?: string }
+ */
+async function checkSpendLimit(playerId, chargeAmount) {
+  const now = new Date();
+
+  // Calculate date ranges
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(now.getDate() - now.getDay());
+  startOfWeek.setHours(0, 0, 0, 0);
+
+  const startOfDayISO = startOfDay.toISOString();
+  const startOfWeekISO = startOfWeek.toISOString();
+  const nowISO = now.toISOString();
+
+  // Get player limits — player may not have any set
+  const { data: limits } = await supabase
+    .from('player_limits')
+    .select('daily_limit, weekly_limit')
+    .eq('player_id', playerId)
+    .maybeSingle();
+
+  if (!limits) {
+    return { allowed: true }; // No limits set
+  }
+
+  // Get today's spending
+  const { data: todayTxns } = await supabase
+    .from('transactions')
+    .select('amount')
+    .eq('player_id', playerId)
+    .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
+    .gte('created_at', startOfDayISO)
+    .lte('created_at', nowISO);
+
+  const spentToday = (todayTxns || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+  // Check daily limit
+  if (limits.daily_limit && spentToday + chargeAmount > limits.daily_limit) {
+    return {
+      allowed: false,
+      reason: `Daily limit exceeded. Spent today: ₦${spentToday}, Limit: ₦${limits.daily_limit}`,
+    };
+  }
+
+  // Get this week's spending
+  const { data: weekTxns } = await supabase
+    .from('transactions')
+    .select('amount')
+    .eq('player_id', playerId)
+    .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
+    .gte('created_at', startOfWeekISO)
+    .lte('created_at', nowISO);
+
+  const spentThisWeek = (weekTxns || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+  // Check weekly limit
+  if (limits.weekly_limit && spentThisWeek + chargeAmount > limits.weekly_limit) {
+    return {
+      allowed: false,
+      reason: `Weekly limit exceeded. Spent this week: ₦${spentThisWeek}, Limit: ₦${limits.weekly_limit}`,
+    };
+  }
+
+  return { allowed: true };
+}
+
 /** Fisher-Yates in-place shuffle */
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -290,6 +361,14 @@ router.post('/start', idempotency(), auth, async (req, res) => {
         code: 'INSUFFICIENT_QUESTIONS',
         error: 'This pack has no available questions yet.',
       });
+    }
+
+    // Check spend limits
+    if (entryFee > 0) {
+      const limitCheck = await checkSpendLimit(player.id, entryFee);
+      if (!limitCheck.allowed) {
+        return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
+      }
     }
 
     // Check balance
