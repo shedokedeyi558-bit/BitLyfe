@@ -114,6 +114,12 @@ router.get('/packs', async (req, res) => {
         target_bank_progress: isSpecial && pack.target_bank_size
           ? { current: availableCount, target: pack.target_bank_size, percent: parseFloat(((availableCount / pack.target_bank_size) * 100).toFixed(1)) }
           : null,
+        // ── Time fields (Specials-only) — store seconds, expose both ───────
+        // total_time_seconds: raw value stored in DB
+        // time_limit_minutes: human-readable, use this to populate the form field
+        time_limit_minutes: isSpecial && pack.total_time_seconds
+          ? Math.round(pack.total_time_seconds / 60)
+          : null,
       };
     });
 
@@ -179,7 +185,7 @@ router.post('/packs', async (req, res) => {
       if (!total_time_seconds || total_time_seconds < 60) {
         return res.status(400).json({
           success: false,
-          error: 'Special packs require total_time_seconds or total_time_minutes (minimum 60 seconds / 1 minute)',
+          error: 'Special packs require a time limit of at least 1 minute. Send total_time_minutes (e.g. 15) or total_time_seconds (e.g. 900).',
         });
       }
       if (!required_correct || required_correct < 1 || required_correct > question_count) {
