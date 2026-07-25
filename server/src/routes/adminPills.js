@@ -32,7 +32,7 @@ router.get('/packs', async (req, res) => {
   try {
     const { data: packs, error: packsErr } = await supabase
       .from('pill_packs')
-      .select('*')
+      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, current_entries, is_featured, created_at')
       .order('created_at', { ascending: false });
 
     if (packsErr) return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
@@ -198,31 +198,28 @@ router.post('/packs', async (req, res) => {
       }
     }
 
-    const { data, error } = await supabase
-      .from('pill_packs')
-      .insert({
-        name,
-        category: category || 'General',
-        status: status || 'draft',
-        entry_fee: entry_fee !== undefined ? Number(entry_fee) : null,
-        prize: prize !== undefined ? Number(prize) : null,
-        is_vip: is_vip === true || is_vip === 'true',
-        pack_type: effectiveType,
-        question_count: isSpecial ? Number(question_count) : null,
-        total_time_seconds: isSpecial ? Number(total_time_seconds) : null,
-        required_correct: isSpecial ? Number(required_correct) : null,
-        entry_window_end: isSpecial && entry_window_end ? new Date(entry_window_end).toISOString() : null,
-        quiz_expires_at: quiz_expires_at ? new Date(quiz_expires_at).toISOString() : null,
-        target_bank_size: isSpecial && target_bank_size !== undefined && target_bank_size !== null
-          ? Number(target_bank_size)
-          : null,
-        max_entries: isSpecial && max_entries !== undefined && max_entries !== null
-          ? Number(max_entries)
-          : null,
-        // current_entries: omit — will default to 0 in DB (avoids schema cache issues)
-      })
-      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
-      .single();
+    // Use a stored procedure to bypass PostgREST schema cache validation.
+    // Direct .insert() on pill_packs fails with PGRST204 because the schema cache
+    // is stale and doesn't know about recently-added columns (max_entries, quiz_expires_at, etc.).
+    // supabase.rpc() executes raw SQL directly, completely bypassing that validation.
+    const { data, error } = await supabase.rpc('admin_create_pill_pack', {
+      p_name:               name,
+      p_category:           category || 'General',
+      p_status:             status || 'draft',
+      p_entry_fee:          entry_fee !== undefined ? Number(entry_fee) : null,
+      p_prize:              prize !== undefined ? Number(prize) : null,
+      p_is_vip:             is_vip === true || is_vip === 'true',
+      p_pack_type:          effectiveType,
+      p_question_count:     isSpecial ? Number(question_count) : null,
+      p_total_time_seconds: isSpecial ? Number(total_time_seconds) : null,
+      p_required_correct:   isSpecial ? Number(required_correct) : null,
+      p_entry_window_end:   isSpecial && entry_window_end ? new Date(entry_window_end).toISOString() : null,
+      p_quiz_expires_at:    quiz_expires_at ? new Date(quiz_expires_at).toISOString() : null,
+      p_target_bank_size:   isSpecial && target_bank_size !== undefined && target_bank_size !== null
+                              ? Number(target_bank_size) : null,
+      p_max_entries:        isSpecial && max_entries !== undefined && max_entries !== null
+                              ? Number(max_entries) : null,
+    });
 
     if (error) {
       console.error('Create pack DB error:', { message: error.message, code: error.code, details: error.details, hint: error.hint });
@@ -280,11 +277,7 @@ router.put('/packs/:packId/feature', async (req, res) => {
     // Apply the new featured value — only affects this pack
     // Multiple packs can be featured simultaneously; no clearing of others
     const { data: updated, error: updateErr } = await supabase
-      .from('pill_packs')
-      .update({ is_featured: Boolean(featured) })
-      .eq('id', packId)
-      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
-      .single();
+      .rpc('admin_update_pill_pack', { p_id: packId, p_updates: { is_featured: Boolean(featured) } });
 
     if (updateErr) {
       return res.status(500).json({ success: false, error: 'Failed to update featured status' });
@@ -399,11 +392,7 @@ router.put('/packs/:packId', async (req, res) => {
         if (warning) {
           // Store warning for response — apply update first then return with warning
           const { data: updated, error: updateErr } = await supabase
-            .from('pill_packs')
-            .update({ ...updates })
-            .eq('id', packId)
-            .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
-            .single();
+            .rpc('admin_update_pill_pack', { p_id: packId, p_updates: updates });
 
           if (updateErr || !updated) return res.status(404).json({ success: false, error: 'Pack not found or update failed' });
           return res.json({ success: true, warning, data: { pack: updated } });
@@ -412,11 +401,7 @@ router.put('/packs/:packId', async (req, res) => {
     }
 
     const { data, error } = await supabase
-      .from('pill_packs')
-      .update(updates)
-      .eq('id', packId)
-      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
-      .single();
+      .rpc('admin_update_pill_pack', { p_id: packId, p_updates: updates });
 
     if (error || !data) return res.status(404).json({ success: false, error: 'Pack not found or update failed' });
 
@@ -630,9 +615,7 @@ router.delete('/packs/:packId', async (req, res) => {
     }
 
     const { error: packUpdateErr } = await supabase
-      .from('pill_packs')
-      .update({ status: 'inactive' })
-      .eq('id', packId);
+      .rpc('admin_update_pill_pack', { p_id: packId, p_updates: { status: 'inactive' } });
 
     if (packUpdateErr) {
       return res.status(500).json({ success: false, error: 'Failed to delete pack' });
