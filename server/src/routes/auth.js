@@ -273,7 +273,8 @@ router.post('/signup', async (req, res) => {
     // Generate unique referral code for this new player
     const newReferralCode = await generateReferralCode();
 
-    const { data: player, error: insertErr } = await supabase
+    // Step 1: Insert new player
+    const { data: inserted, error: insertErr } = await supabase
       .from('players')
       .insert({
         email: normalizedEmail,
@@ -283,12 +284,36 @@ router.post('/signup', async (req, res) => {
         balance: newUserBonus,
         is_admin: false,
         referral_code: newReferralCode,
-      })
-      .select('id, email, phone, name, balance, is_admin, referral_code')
-      .single();
+      });
 
     if (insertErr) {
       console.error('Signup insert error:', insertErr);
+      return res.status(500).json({ success: false, error: 'Failed to create account' });
+    }
+
+    // Step 2: Fetch created player with retry — handle Supabase read-after-write lag
+    // Retry up to 3 times with 200ms delay (same pattern as pills.js)
+    let player = null;
+    let selectErr = null;
+    const playerId = inserted[0].id;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await supabase
+        .from('players')
+        .select('id, email, phone, name, balance, is_admin, referral_code')
+        .eq('id', playerId)
+        .maybeSingle();
+
+      player = result.data;
+      selectErr = result.error;
+
+      if (player || selectErr) break;  // found or real error — stop retrying
+      // Row not found yet — brief wait for write to propagate
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (selectErr || !player) {
+      console.error('Signup select error after insert:', selectErr);
       return res.status(500).json({ success: false, error: 'Failed to create account' });
     }
 
@@ -486,7 +511,8 @@ router.post('/register', async (req, res) => {
     // Hash password if provided — new players can set a password on first signup
     const password_hash = password ? await bcrypt.hash(String(password), 10) : null;
 
-    const { data: player, error } = await supabase
+    // Step 1: Insert new player
+    const { data: inserted, error: insertErr } = await supabase
       .from('players')
       .insert({
         phone: normalizedPhone,
@@ -495,15 +521,40 @@ router.post('/register', async (req, res) => {
         is_admin: false,
         referral_code: newReferralCode,
         password_hash,
-      })
-      .select()
-      .single();
+      });
 
-    if (error) {
+    // Step 2: Handle insert errors (including unique constraint violations)
+    if (insertErr) {
       // Postgres unique constraint violation on phone (code 23505)
-      if (error.code === '23505' && error.message?.includes('phone')) {
+      if (insertErr.code === '23505' && insertErr.message?.includes('phone')) {
         return res.status(409).json({ success: false, error: 'This number is already registered — sign in instead.' });
       }
+      return res.status(500).json({ success: false, error: 'Failed to create player' });
+    }
+
+    // Step 3: Fetch created player with retry — handle Supabase read-after-write lag
+    // Retry up to 3 times with 200ms delay (same pattern as pills.js)
+    let player = null;
+    let selectErr = null;
+    const playerId = inserted[0].id;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await supabase
+        .from('players')
+        .select()
+        .eq('id', playerId)
+        .maybeSingle();
+
+      player = result.data;
+      selectErr = result.error;
+
+      if (player || selectErr) break;  // found or real error — stop retrying
+      // Row not found yet — brief wait for write to propagate
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (selectErr || !player) {
+      console.error('Register select error after insert:', selectErr);
       return res.status(500).json({ success: false, error: 'Failed to create player' });
     }
 
