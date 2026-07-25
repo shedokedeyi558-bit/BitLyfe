@@ -434,29 +434,37 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
 
 /**
  * GET /api/admin/specials-bank/library
- * List non-deleted draft library questions (paginated).
- * Query: ?page=1&limit=20&label=X&format=X&search=X
+ * List non-deleted draft library questions.
+ * Returns all questions by default (no hard cap).
+ * Optional query params: ?label=X&format=X&search=X
+ * Optional pagination (if needed): ?page=1&limit=100
  */
 router.get('/library', async (req, res) => {
   try {
-    const { page = 1, limit = 20, label, format, search } = req.query;
-    const offset = (Number(page) - 1) * Number(limit);
+    const { page, limit, label, format, search } = req.query;
 
     let query = supabase
       .from('draft_question_library')
       .select('id, question, format, options, correct_answer, case_sensitive, color, label, note, created_at, updated_at', { count: 'exact' })
       .is('deleted_at', null)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + Number(limit) - 1);
+      .order('created_at', { ascending: false });
 
     if (label)  query = query.eq('label', label);
     if (format) query = query.eq('format', format);
     if (search) query = query.ilike('question', `%${search}%`);
 
+    // Only apply pagination if explicitly requested — default returns all questions
+    if (limit !== undefined) {
+      const pageNum  = Math.max(1, Number(page) || 1);
+      const limitNum = Math.max(1, Number(limit));
+      const offset   = (pageNum - 1) * limitNum;
+      query = query.range(offset, offset + limitNum - 1);
+    }
+
     const { data, error, count } = await query;
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch library' });
 
-    return res.json({ success: true, data: { questions: data, total: count, page: Number(page), limit: Number(limit) } });
+    return res.json({ success: true, data: { questions: data, total: count } });
   } catch (err) {
     console.error('Library list error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch library' });
