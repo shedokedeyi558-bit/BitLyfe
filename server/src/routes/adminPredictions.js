@@ -59,47 +59,20 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * POST /api/admin/predictions
- * Create a new prediction
+ * POST /api/admin/predictions — REMOVED (dead code)
+ *
+ * This endpoint accepted countdown_seconds (seconds from now) but the admin
+ * form actually calls POST /api/admin/games/create with game_type=predictions,
+ * which accepts countdown_end (ISO date string) and returns the unified game
+ * shape used by the Time Machine list.
+ *
+ * Confirmed dead in commit dc1a306 (2026-07-19):
+ *   "POST /api/admin/predictions remains available but is not the primary
+ *    creation path for the current admin form."
+ *
+ * Deleted here to prevent future silent divergence.
+ * Use POST /api/admin/games/create with game_type=predictions instead.
  */
-router.post('/', async (req, res) => {
-  try {
-    const { question, category, entry_fee, prize_per_winner, max_participants, countdown_seconds } = req.body;
-
-    if (!question || entry_fee === undefined || prize_per_winner === undefined || !countdown_seconds) {
-      return res.status(400).json({
-        success: false,
-        error: 'question, entry_fee, prize_per_winner, and countdown_seconds are required',
-      });
-    }
-
-    // Calculate countdown end time
-    const countdownEndTime = new Date(Date.now() + countdown_seconds * 1000).toISOString();
-
-    const { data, error } = await supabase
-      .from('predictions')
-      .insert({
-        admin_id: req.admin.id,
-        question,
-        category: category || 'General',
-        entry_fee: Number(entry_fee),
-        prize_per_winner: Number(prize_per_winner),
-        max_participants: max_participants || 10,
-        countdown_seconds: Number(countdown_seconds),
-        countdown_end_time: countdownEndTime,
-        status: 'active',
-      })
-      .select()
-      .single();
-
-    if (error) return res.status(500).json({ success: false, error: 'Failed to create prediction' });
-
-    return res.status(201).json({ success: true, data: { prediction: data } });
-  } catch (err) {
-    console.error('Create prediction error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to create prediction' });
-  }
-});
 
 /**
  * GET /api/admin/predictions/audit-log
