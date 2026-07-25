@@ -408,6 +408,17 @@ router.post('/answer/:attemptId', auth, async (req, res) => {
     const secsLeft = secondsRemaining(attempt.started_at, attempt.total_time_seconds);
     const timedOut = secsLeft <= 0;
 
+    // ── Block submissions after timeout ───────────────────────────────────────
+    // Timer has expired — no new submissions allowed. Return immediately without locking.
+    if (timedOut) {
+      return res.status(408).json({
+        success: false,
+        code: 'TIMEOUT_EXPIRED',
+        error: 'The timer has expired. This question is now locked.',
+        locked: true,
+      });
+    }
+
     // ── Atomic per-question lock ──────────────────────────────────────────────
     const now = new Date().toISOString();
     const { data: lockCount, error: lockErr } = await supabase

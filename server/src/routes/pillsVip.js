@@ -446,6 +446,17 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'All questions already answered' });
     }
 
+    // ── Block submissions after timeout ───────────────────────────────────────
+    // Timer has expired — no new submissions allowed. Return immediately without locking.
+    if (timedOut) {
+      return res.status(408).json({
+        success: false,
+        code: 'TIMEOUT_EXPIRED',
+        error: 'The timer has expired. This question is now locked.',
+        locked: true,
+      });
+    }
+
     // ── Atomic per-question lock ──────────────────────────────────────────────
     // lock_special_answer() does:
     //   UPDATE special_attempts

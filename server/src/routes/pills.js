@@ -635,16 +635,43 @@ router.post('/submit', auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'You must open this pill first' });
     }
 
+    // ── Validate answer is not empty ──────────────────────────────────────────
+    // Prevent locking empty strings that would lock out player from any retry
+    if (!answer || String(answer).trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        code: 'EMPTY_ANSWER',
+        error: 'Please enter an answer before submitting',
+      });
+    }
+
+    // ── Check timeout: no submission allowed after timer expires ─────────────────
+    // If player opened this pill, check if the timer has expired
+    const now = new Date();
+    const nowISO = now.toISOString();
+    const timerSeconds = pill.timer_seconds || 10;
+    const openedAt = new Date(play.created_at);
+    const elapsedSeconds = (now - openedAt) / 1000;
+
+    if (elapsedSeconds > timerSeconds) {
+      return res.status(408).json({
+        success: false,
+        code: 'TIMEOUT_EXPIRED',
+        error: 'The timer has expired. This question is now locked.',
+        locked: true,
+        locked_at: null,
+      });
+    }
+
     // ── Atomic lock: only the first submit wins ────────────────────────────
     // lock_pill_answer() does UPDATE ... WHERE locked_at IS NULL
     // and returns the row count. 0 means already locked → reject.
-    const now = new Date().toISOString();
     const { data: lockCount, error: lockErr } = await supabase
       .rpc('lock_pill_answer', {
         p_pill_id:   pillId,
         p_player_id: player.id,
         p_answer:    String(answer),
-        p_now:       now,
+        p_now:       nowISO,
       });
 
     if (lockErr) {
