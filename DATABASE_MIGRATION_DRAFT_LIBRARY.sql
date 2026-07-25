@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS draft_question_library (
   options        JSONB,                        -- null for type_answer questions
   correct_answer TEXT NOT NULL,
   case_sensitive BOOLEAN NOT NULL DEFAULT false,
-  timer_seconds  INTEGER NOT NULL DEFAULT 30,
+  timer_seconds  INTEGER,
   color          VARCHAR(20) DEFAULT '#8B5CF6',
 
   -- Admin organisation fields
