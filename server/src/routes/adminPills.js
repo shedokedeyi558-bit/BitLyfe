@@ -144,9 +144,21 @@ router.post('/packs', async (req, res) => {
   try {
     const {
       name, category, status, entry_fee, prize, is_vip,
-      pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
+      pack_type, question_count, required_correct, entry_window_end,
       quiz_expires_at, target_bank_size, max_entries,
     } = req.body;
+
+    // Accept either total_time_seconds (raw seconds) or total_time_minutes (converted to seconds).
+    // Frontend may send either — both are normalised to seconds here.
+    let total_time_seconds = req.body.total_time_seconds;
+    if (total_time_seconds === undefined || total_time_seconds === null || total_time_seconds === '') {
+      const mins = req.body.total_time_minutes;
+      if (mins !== undefined && mins !== null && mins !== '') {
+        total_time_seconds = Number(mins) * 60;
+      }
+    } else {
+      total_time_seconds = Number(total_time_seconds);
+    }
 
     if (!name) {
       return res.status(400).json({ success: false, error: 'name is required' });
@@ -167,7 +179,7 @@ router.post('/packs', async (req, res) => {
       if (!total_time_seconds || total_time_seconds < 60) {
         return res.status(400).json({
           success: false,
-          error: 'Special packs require total_time_seconds (minimum 60)',
+          error: 'Special packs require total_time_seconds or total_time_minutes (minimum 60 seconds / 1 minute)',
         });
       }
       if (!required_correct || required_correct < 1 || required_correct > question_count) {
@@ -207,7 +219,10 @@ router.post('/packs', async (req, res) => {
       .select()
       .single();
 
-    if (error) return res.status(500).json({ success: false, error: 'Failed to create pack' });
+    if (error) {
+      console.error('Create pack DB error:', error);
+      return res.status(500).json({ success: false, error: 'Failed to create pack', details: error.message });
+    }
 
     return res.status(201).json({ success: true, data: { pack: { ...data, pills: [] } } });
   } catch (err) {
@@ -299,8 +314,17 @@ router.put('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
     const { name, category, status, entry_fee, prize, is_vip,
-            pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
+            pack_type, question_count, required_correct, entry_window_end,
             quiz_expires_at, target_bank_size, max_entries } = req.body;
+
+    // Accept either total_time_seconds (raw seconds) or total_time_minutes (converted to seconds).
+    let total_time_seconds = req.body.total_time_seconds;
+    if (total_time_seconds === undefined || total_time_seconds === null || total_time_seconds === '') {
+      const mins = req.body.total_time_minutes;
+      if (mins !== undefined && mins !== null && mins !== '') {
+        total_time_seconds = Number(mins) * 60;
+      }
+    }
 
     const updates = {};
     if (name !== undefined) updates.name = name;
