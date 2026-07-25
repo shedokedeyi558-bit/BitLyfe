@@ -154,6 +154,8 @@ router.post('/packs', async (req, res) => {
       quiz_expires_at, target_bank_size, max_entries,
     } = req.body;
 
+    console.log('POST /packs request body:', { name, category, status, entry_fee, prize, is_vip, pack_type, question_count, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, total_time_seconds: req.body.total_time_seconds, total_time_minutes: req.body.total_time_minutes });
+
     // Accept either total_time_seconds (raw seconds) or total_time_minutes (converted to seconds).
     // Frontend may send either — both are normalised to seconds here.
     let total_time_seconds = req.body.total_time_seconds;
@@ -226,8 +228,8 @@ router.post('/packs', async (req, res) => {
       .single();
 
     if (error) {
-      console.error('Create pack DB error:', error);
-      return res.status(500).json({ success: false, error: 'Failed to create pack', details: error.message });
+      console.error('Create pack DB error:', { message: error.message, code: error.code, details: error.details, hint: error.hint });
+      return res.status(500).json({ success: false, error: 'Failed to create pack', details: error.message, code: error.code });
     }
 
     return res.status(201).json({ success: true, data: { pack: { ...data, pills: [] } } });
