@@ -21,7 +21,7 @@ const blitzRoutes = require('./routes/blitz');
 const adminBlitzRoutes = require('./routes/adminBlitz');
 const { router: referralsRouter } = require('./routes/referrals');
 const pillsVipRoutes = require('./routes/pillsVip');
-const pillsSpecialRoutes = require('./routes/pillsSpecial');
+// pillsSpecialRoutes removed — /api/pills/special/* was dead code, superseded by pillsVip.js (/api/pills/vip/*)
 const adminSpecialsBankRoutes = require('./routes/adminSpecialsBank');
 const supabase = require('./db/supabase');
 
@@ -148,7 +148,8 @@ app.use('/api/game/submit', gameLimiter);
 app.use('/api/game', gameRoutes);
 app.use('/api/pills', gameLimiter, pillsRoutes);
 app.use('/api/pills/vip', gameLimiter, pillsVipRoutes);
-app.use('/api/pills/special', gameLimiter, pillsSpecialRoutes);
+// /api/pills/special removed — pillsSpecial.js was dead code (zero frontend calls)
+// All Specials/VIP gameplay goes through /api/pills/vip via pillsVip.js
 app.use('/api/predictions', gameLimiter, predictionsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/blitz', gameLimiter, blitzRoutes);
