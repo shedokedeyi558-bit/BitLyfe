@@ -99,6 +99,12 @@ router.get('/packs', async (req, res) => {
         // ── Quiz expiry fields ─────────────────────────────────────────────
         quiz_expires_at: pack.quiz_expires_at || null,
         quiz_expired: pack.quiz_expires_at ? new Date(pack.quiz_expires_at) < new Date() : false,
+        // ── Target bank size (Specials informational) ──────────────────────
+        target_bank_size: isSpecial ? (pack.target_bank_size || null) : null,
+        // progress toward target: null if no target set
+        target_bank_progress: isSpecial && pack.target_bank_size
+          ? { current: availableCount, target: pack.target_bank_size, percent: parseFloat(((availableCount / pack.target_bank_size) * 100).toFixed(1)) }
+          : null,
       };
     });
 
@@ -125,7 +131,7 @@ router.post('/packs', async (req, res) => {
     const {
       name, category, status, entry_fee, prize, is_vip,
       pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
-      quiz_expires_at,
+      quiz_expires_at, target_bank_size,
     } = req.body;
 
     if (!name) {
@@ -174,6 +180,10 @@ router.post('/packs', async (req, res) => {
         entry_window_end: isSpecial && entry_window_end ? new Date(entry_window_end).toISOString() : null,
         // quiz_expires_at: Pills/Specials-only expiry — independent of entry_window_end
         quiz_expires_at: quiz_expires_at ? new Date(quiz_expires_at).toISOString() : null,
+        // target_bank_size: Specials-only informational target — does not affect activation
+        target_bank_size: isSpecial && target_bank_size !== undefined && target_bank_size !== null
+          ? Number(target_bank_size)
+          : null,
       })
       .select()
       .single();
@@ -267,7 +277,7 @@ router.put('/packs/:packId', async (req, res) => {
     const { packId } = req.params;
     const { name, category, status, entry_fee, prize, is_vip,
             pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
-            quiz_expires_at } = req.body;
+            quiz_expires_at, target_bank_size } = req.body;
 
     const updates = {};
     if (name !== undefined) updates.name = name;
@@ -282,6 +292,8 @@ router.put('/packs/:packId', async (req, res) => {
     if (entry_window_end !== undefined) updates.entry_window_end = entry_window_end === null ? null : new Date(entry_window_end).toISOString();
     // quiz_expires_at: Pills/Specials expiry — independent of entry_window_end
     if (quiz_expires_at !== undefined) updates.quiz_expires_at = quiz_expires_at === null ? null : new Date(quiz_expires_at).toISOString();
+    // target_bank_size: Specials-only informational target (nullable integer)
+    if (target_bank_size !== undefined) updates.target_bank_size = target_bank_size === null ? null : Number(target_bank_size);
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });
@@ -784,7 +796,7 @@ router.get('/packs/:packId/pills', async (req, res) => {
     // Confirm pack exists
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, question_count, pack_type, is_vip')
+      .select('id, name, question_count, pack_type, is_vip, target_bank_size')
       .eq('id', packId)
       .single();
 
@@ -865,6 +877,11 @@ router.get('/packs/:packId/pills', async (req, res) => {
         pack_id: packId,
         bank_ratio: bankRatio,
         low_entropy_warning: lowEntropyWarning,
+        // target_bank_size: Specials-only informational progress field
+        target_bank_size: isSpecial ? (pack.target_bank_size || null) : null,
+        target_bank_progress: isSpecial && pack.target_bank_size
+          ? { current: availableCount, target: pack.target_bank_size, percent: parseFloat(((availableCount / pack.target_bank_size) * 100).toFixed(1)) }
+          : null,
       },
     });
   } catch (err) {

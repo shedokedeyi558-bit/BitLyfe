@@ -261,7 +261,10 @@ CREATE TABLE IF NOT EXISTS pill_packs (
   required_correct INTEGER,  -- special only: pass threshold (must be <= question_count)
   entry_window_end TIMESTAMP WITH TIME ZONE, -- special only: when entries close
   is_featured BOOLEAN DEFAULT false, -- only one standard pack featured at a time
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  -- target_bank_size: Specials-only informational goal for the admin (e.g. 300 questions)
+  -- does NOT gate activation — informational only alongside question_count
+  target_bank_size INTEGER
 );
 
 -- Migration: add new columns to existing pill_packs table
