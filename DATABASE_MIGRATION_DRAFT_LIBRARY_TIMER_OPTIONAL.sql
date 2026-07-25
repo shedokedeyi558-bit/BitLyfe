@@ -1,24 +1,21 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- MIGRATION: Make draft_question_library.timer_seconds optional (nullable)
+-- MIGRATION: Drop timer_seconds column from draft_question_library
 --
 -- PURPOSE:
---   Frontend removed timer field from Draft Library UI (library questions only
---   feed into Specials packs which have pack-level time limits, not per-question).
---   Backend now accepts timer_seconds as optional when creating/updating questions.
---   Database column must allow NULL to support this.
+--   Timer per question is not needed. Draft library is just for storing questions.
+--   When questions are copied to a Specials pack, the pack-level time limit applies.
+--   Removing this column simplifies the schema and eliminates unused data.
 --
 -- CHANGE:
---   Alter draft_question_library.timer_seconds from NOT NULL DEFAULT 30
---   to NULLABLE (no default).
+--   DROP COLUMN draft_question_library.timer_seconds
 --
 -- BACKWARDS COMPATIBLE:
---   Existing rows with timer_seconds = 30 are unaffected (just hidden from UI).
---   Future rows can be created without timer (will be null).
---   GET responses still return timer (just not displayed by frontend).
+--   Library questions still work fine without per-question timers.
+--   Specials packs continue using pack-level time limits (quiz_expires_at).
+--   GET /library responses will not include timer field.
 --
 -- IDEMPOTENT — safe to run more than once.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 ALTER TABLE draft_question_library
-ALTER COLUMN timer_seconds DROP NOT NULL,
-ALTER COLUMN timer_seconds DROP DEFAULT;
+DROP COLUMN IF EXISTS timer_seconds;

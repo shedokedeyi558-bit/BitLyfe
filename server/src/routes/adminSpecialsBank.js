@@ -238,23 +238,12 @@ function normaliseRow(raw, index) {
     try { options = JSON.parse(options); } catch { options = null; }
   }
 
-  // timer_seconds is now optional for library questions (frontend no longer sends it).
-  // If provided in import, use it; otherwise leave as null/undefined.
-  // Do NOT default to 30 anymore — library questions don't use per-question timers.
-  let timer_seconds = null;
-  if (raw.timer_seconds !== undefined && raw.timer_seconds !== null && raw.timer_seconds !== '') {
-    timer_seconds = Number(raw.timer_seconds);
-  } else if (raw.timer !== undefined && raw.timer !== null && raw.timer !== '') {
-    timer_seconds = Number(raw.timer);
-  }
-
   return {
     question,
     format,
     options:        options || null,
     correct_answer,
     case_sensitive: raw.case_sensitive === true || raw.case_sensitive === 'true',
-    timer_seconds:  timer_seconds,  // Now null if not provided, instead of defaulting to 30
     color:          raw.color || '#8B5CF6',
   };
 }
@@ -457,7 +446,7 @@ router.get('/library', async (req, res) => {
 
     let query = supabase
       .from('draft_question_library')
-      .select('id, question, format, options, correct_answer, case_sensitive, timer_seconds, color, label, note, created_at, updated_at', { count: 'exact' })
+      .select('id, question, format, options, correct_answer, case_sensitive, color, label, note, created_at, updated_at', { count: 'exact' })
       .is('deleted_at', null)
       .order('created_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1);
@@ -479,11 +468,11 @@ router.get('/library', async (req, res) => {
 /**
  * POST /api/admin/specials-bank/library
  * Add one question to the draft library.
- * Body: { question, format, options?, correct_answer, case_sensitive?, timer_seconds?, color?, label?, note? }
+ * Body: { question, format, options?, correct_answer, case_sensitive?, color?, label?, note? }
  */
 router.post('/library', async (req, res) => {
   try {
-    const { question, format, options, correct_answer, case_sensitive, timer_seconds, color, label, note } = req.body;
+    const { question, format, options, correct_answer, case_sensitive, color, label, note } = req.body;
 
     if (!question || !correct_answer) {
       return res.status(400).json({ success: false, error: 'question and correct_answer are required' });
@@ -493,9 +482,6 @@ router.post('/library', async (req, res) => {
       return res.status(400).json({ success: false, error: 'format must be multiple_choice or type_answer' });
     }
 
-    // timer_seconds is now optional (frontend no longer sends it for library questions).
-    // If provided, use it; otherwise store null (no per-question timer for library).
-    // Library questions are never used outside Specials packs anyway (which use pack-level time limit).
     const insertData = {
       admin_id:       req.admin?.id || null,
       question:       question.trim(),
@@ -507,11 +493,6 @@ router.post('/library', async (req, res) => {
       label:          label || null,
       note:           note  || null,
     };
-    
-    // Only include timer_seconds if explicitly provided (not undefined/null)
-    if (timer_seconds !== undefined && timer_seconds !== null) {
-      insertData.timer_seconds = Number(timer_seconds);
-    }
 
     const { data, error } = await supabase
       .from('draft_question_library')
@@ -531,13 +512,13 @@ router.post('/library', async (req, res) => {
  * PATCH /api/admin/specials-bank/library/:id
  * Edit a draft library question. Blocked if already soft-deleted.
  * Body: { question?, format?, options?, correct_answer?, case_sensitive?,
- *         timer_seconds?, color?, label?, note? }
+ *         color?, label?, note? }
  */
 router.patch('/library/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { question, format, options, correct_answer, case_sensitive,
-            timer_seconds, color, label, note } = req.body;
+            color, label, note } = req.body;
 
     const { data: existing, error: fetchErr } = await supabase
       .from('draft_question_library')
@@ -553,7 +534,6 @@ router.patch('/library/:id', async (req, res) => {
     if (correct_answer !== undefined) updates.correct_answer = correct_answer.trim();
     if (options        !== undefined) updates.options        = options;
     if (case_sensitive !== undefined) updates.case_sensitive = case_sensitive;
-    if (timer_seconds  !== undefined) updates.timer_seconds  = Number(timer_seconds);
     if (color          !== undefined) updates.color          = color;
     if (label          !== undefined) updates.label          = label;
     if (note           !== undefined) updates.note           = note;
@@ -626,7 +606,7 @@ router.delete('/library/:id', async (req, res) => {
  * JSON body:  { "questions": [...] }
  *
  * CSV/JSON columns: question, format, options (JSON string), correct_answer,
- *                   case_sensitive, timer_seconds, color, label, note
+ *                   case_sensitive, color, label, note
  *
  * All rows validated before any insert. Response includes inserted rows.
  */
@@ -651,7 +631,6 @@ router.post('/library/import', upload.single('file'), async (req, res) => {
       options:        q.options,
       correct_answer: q.correct_answer,
       case_sensitive: q.case_sensitive,
-      timer_seconds:  q.timer_seconds,
       color:          q.color,
       label:          null,
       note:           null,
@@ -706,7 +685,7 @@ router.post('/library/copy-to-pack', async (req, res) => {
       question_ids.map((qid) =>
         supabase
           .from('draft_question_library')
-          .select('question, format, options, correct_answer, case_sensitive, timer_seconds, color')
+          .select('question, format, options, correct_answer, case_sensitive, color')
           .eq('id', qid)
           .is('deleted_at', null)
           .maybeSingle()
@@ -722,6 +701,8 @@ router.post('/library/copy-to-pack', async (req, res) => {
     const resolvedFee   = pack.entry_fee !== null ? Number(pack.entry_fee)  : 0;
     const resolvedPrize = pack.prize      !== null ? Number(pack.prize)      : 0;
 
+    // When copying from library to pack: do NOT copy timer_seconds
+    // Pack uses pack-level quiz_expires_at for time limits, not per-question timers
     const toInsert = drafts.map((q) => ({
       admin_id:       req.admin?.id || null,
       pack_id:        pack_id,
@@ -730,7 +711,6 @@ router.post('/library/copy-to-pack', async (req, res) => {
       options:        q.options,
       correct_answer: q.correct_answer,
       case_sensitive: q.case_sensitive,
-      timer_seconds:  q.timer_seconds,
       color:          q.color,
       entry_fee:      resolvedFee,
       prize:          resolvedPrize,
