@@ -339,6 +339,19 @@ router.post('/signup', async (req, res) => {
       });
     }
 
+    // Welcome notification for new players only
+    try {
+      await supabase.from('notifications').insert({
+        player_id: player.id,
+        type: 'announcement',
+        title: 'Welcome to BitLyfe! 🎉',
+        message: 'Answer your first question and get paid instantly. Browse packs, join live prediction events, and start stacking wins.',
+        read: false,
+      }).catch(() => {});  // fire-and-forget — never block signup on notification failure
+    } catch (err) {
+      console.error('Welcome notification creation failed:', err.message);
+    }
+
     const token = generateToken(player);
 
     return res.status(201).json({
@@ -521,7 +534,8 @@ router.post('/register', async (req, res) => {
         is_admin: false,
         referral_code: newReferralCode,
         password_hash,
-      });
+      })
+      .select();
 
     // Step 2: Handle insert errors (including unique constraint violations)
     if (insertErr) {
@@ -580,13 +594,18 @@ router.post('/register', async (req, res) => {
     }
 
     // Welcome notification for new players only
-    await supabase.from('notifications').insert({
-      player_id: player.id,
-      type: 'announcement',
-      title: 'Welcome to BitLyfe! 🎉',
-      message: 'Answer your first question and get paid instantly. Browse packs, join live prediction events, and start stacking wins.',
-      read: false,
-    }).catch(() => {}); // fire-and-forget — never block signup on notification failure
+    try {
+      await supabase.from('notifications').insert({
+        player_id: player.id,
+        type: 'announcement',
+        title: 'Welcome to BitLyfe! 🎉',
+        message: 'Answer your first question and get paid instantly. Browse packs, join live prediction events, and start stacking wins.',
+        read: false,
+      });
+    } catch (err) {
+      // fire-and-forget — never block signup on notification failure
+      console.error('Welcome notification creation failed:', err.message);
+    }
 
     return res.status(201).json({
       success: true,
