@@ -24,6 +24,20 @@ const router = express.Router();
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 /**
+ * Determine the input mode for type-answer questions based on correct_answer.
+ * Returns 'numeric' if the answer is purely numeric (digits, optional decimal/minus/hyphen),
+ * otherwise returns 'text'.
+ */
+function getAnswerInputMode(correctAnswer) {
+  if (!correctAnswer || typeof correctAnswer !== 'string') {
+    return 'text';
+  }
+
+  const numericPattern = /^-?\d+(?:\.\d+)?(?:-\d+)?$/;
+  return numericPattern.test(correctAnswer.trim()) ? 'numeric' : 'text';
+}
+
+/**
  * Check player's daily and weekly spend limits.
  * Returns { allowed: boolean, reason?: string }
  */
@@ -136,6 +150,7 @@ function sanitize(pill, index, total) {
     format: pill.format,
     options: pill.options || null,
     color: pill.color || '#8B5CF6',
+    answer_input_mode: pill.format === 'type_answer' ? getAnswerInputMode(pill.correct_answer) : undefined,
   };
 }
 

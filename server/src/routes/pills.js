@@ -12,6 +12,31 @@ const router = express.Router();
 // ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 
 /**
+ * Determine the input mode for type-answer questions based on correct_answer.
+ * Returns 'numeric' if the answer is purely numeric (digits, optional decimal/minus/hyphen),
+ * otherwise returns 'text'.
+ *
+ * Numeric patterns:
+ *  - "8" → numeric
+ *  - "-3" → numeric (negative)
+ *  - "3.5" → numeric (decimal)
+ *  - "2-1" → numeric (scoreline)
+ *  - "Lagos" → text (contains letters)
+ *  - "8 sides" → text (contains spaces and letters)
+ */
+function getAnswerInputMode(correctAnswer) {
+  if (!correctAnswer || typeof correctAnswer !== 'string') {
+    return 'text';
+  }
+
+  // Match: optional minus, digits with optional single decimal point, optional hyphen for scoreline
+  // Pattern: ^-?\d+(?:\.\d+)?(?:-\d+)?$
+  // Examples: 8, -3, 3.5, 2-1, but NOT 8.5.2 or multiple hyphens
+  const numericPattern = /^-?\d+(?:\.\d+)?(?:-\d+)?$/;
+  return numericPattern.test(correctAnswer.trim()) ? 'numeric' : 'text';
+}
+
+/**
  * Check if player's spend limits would be exceeded by a new charge
  * Returns { allowed: boolean, reason?: string }
  */
@@ -449,6 +474,7 @@ router.post('/open', idempotency(), auth, async (req, res) => {
           format: pill.format,
           options: pill.options,
           timer: pill.timer_seconds,
+          answer_input_mode: pill.format === 'type_answer' ? getAnswerInputMode(pill.correct_answer) : undefined,
           prize: resumePrize,
           entryFee: 0,   // already paid — no charge on resume
           newBalance: freshPlayer?.balance ?? player.balance,
@@ -544,6 +570,7 @@ router.post('/open', idempotency(), auth, async (req, res) => {
         format: pill.format,
         options: pill.options,
         timer: pill.timer_seconds,
+        answer_input_mode: pill.format === 'type_answer' ? getAnswerInputMode(pill.correct_answer) : undefined,
         prize: responsePrize,
         entryFee: entryFee,
         newBalance: billing.newBalance,
