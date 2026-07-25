@@ -99,6 +99,15 @@ router.get('/packs', async (req, res) => {
         // ── Quiz expiry fields ─────────────────────────────────────────────
         quiz_expires_at: pack.quiz_expires_at || null,
         quiz_expired: pack.quiz_expires_at ? new Date(pack.quiz_expires_at) < new Date() : false,
+        // ── Entry cap fields (Specials-only) ───────────────────────────────
+        max_entries: isSpecial ? (pack.max_entries || null) : null,
+        current_entries: isSpecial ? (pack.current_entries || 0) : null,
+        entries_remaining: isSpecial && pack.max_entries
+          ? Math.max(0, pack.max_entries - (pack.current_entries || 0))
+          : null,
+        entry_cap_reached: isSpecial && pack.max_entries
+          ? (pack.current_entries || 0) >= pack.max_entries
+          : false,
         // ── Target bank size (Specials informational) ──────────────────────
         target_bank_size: isSpecial ? (pack.target_bank_size || null) : null,
         // progress toward target: null if no target set
@@ -118,20 +127,25 @@ router.get('/packs', async (req, res) => {
 /**
  * POST /api/admin/pills/packs
  * Create a new pill pack
- * Body: { name, category, status?, entry_fee?, prize?, quiz_expires_at? }
+ * Body: { name, category, status?, entry_fee?, prize?, quiz_expires_at?, max_entries? }
  * entry_fee and prize are pack-level — all pills in this pack share these values.
  *
  * quiz_expires_at: optional ISO timestamp (or duration expressed as hours, e.g.
  *   pass "24h" to get now + 24 hours, or a full ISO string for a specific time).
  *   Once this time passes, no new player entries are accepted server-side.
  *   Independent of entry_window_end — do NOT confuse the two.
+ *
+ * max_entries (Specials-only, nullable):
+ *   If set, closes the pack once current_entries >= max_entries.
+ *   Independent of quiz_expires_at — whichever limit hits first closes the pack.
+ *   Examples: 50 rounds, 100 entries, etc.
  */
 router.post('/packs', async (req, res) => {
   try {
     const {
       name, category, status, entry_fee, prize, is_vip,
       pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
-      quiz_expires_at, target_bank_size,
+      quiz_expires_at, target_bank_size, max_entries,
     } = req.body;
 
     if (!name) {
@@ -184,6 +198,11 @@ router.post('/packs', async (req, res) => {
         target_bank_size: isSpecial && target_bank_size !== undefined && target_bank_size !== null
           ? Number(target_bank_size)
           : null,
+        // max_entries: Specials-only entry cap (independent of quiz_expires_at)
+        max_entries: isSpecial && max_entries !== undefined && max_entries !== null
+          ? Number(max_entries)
+          : null,
+        current_entries: 0,  // Initialize entry counter
       })
       .select()
       .single();
@@ -266,18 +285,22 @@ router.put('/packs/:packId/feature', async (req, res) => {
 
 /**
  * PUT /api/admin/pills/packs/:packId
- * Update a pack's name, category, status, entry_fee, prize, or quiz_expires_at.
- * Body: { name?, category?, status?, entry_fee?, prize?, quiz_expires_at? }
+ * Update a pack's name, category, status, entry_fee, prize, quiz_expires_at, or max_entries.
+ * Body: { name?, category?, status?, entry_fee?, prize?, quiz_expires_at?, max_entries? }
  *
  * quiz_expires_at: set to null to clear, or an ISO timestamp to set/update.
  *   This is the Pills/Specials-only expiry — completely independent of entry_window_end.
+ *
+ * max_entries (Specials-only): set to null to remove cap, or a positive integer.
+ *   When set, closes pack once current_entries >= max_entries.
+ *   Independent of quiz_expires_at — whichever limit hits first closes pack.
  */
 router.put('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
     const { name, category, status, entry_fee, prize, is_vip,
             pack_type, question_count, total_time_seconds, required_correct, entry_window_end,
-            quiz_expires_at, target_bank_size } = req.body;
+            quiz_expires_at, target_bank_size, max_entries } = req.body;
 
     const updates = {};
     if (name !== undefined) updates.name = name;
@@ -294,6 +317,8 @@ router.put('/packs/:packId', async (req, res) => {
     if (quiz_expires_at !== undefined) updates.quiz_expires_at = quiz_expires_at === null ? null : new Date(quiz_expires_at).toISOString();
     // target_bank_size: Specials-only informational target (nullable integer)
     if (target_bank_size !== undefined) updates.target_bank_size = target_bank_size === null ? null : Number(target_bank_size);
+    // max_entries: Specials-only entry cap (nullable integer, independent of quiz_expires_at)
+    if (max_entries !== undefined) updates.max_entries = max_entries === null ? null : Number(max_entries);
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });

@@ -122,7 +122,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     // Fetch pack — must be vip/special type and active
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, category, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, quiz_expires_at')
+      .select('id, name, category, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, quiz_expires_at, max_entries, current_entries')
       .eq('id', packId)
       .single();
 
@@ -234,13 +234,27 @@ router.post('/start', idempotency(), auth, async (req, res) => {
 
     // Block new entries if quiz_expires_at has passed.
     // In-progress attempts (resumed above) are NOT affected — only new entries.
-    // This is independent of entry_window_end (Time Machine / predictions only).
     if (pack.quiz_expires_at && new Date(pack.quiz_expires_at) < new Date()) {
       return res.status(410).json({
         success: false,
         code: 'QUIZ_EXPIRED',
         error: 'This pack is no longer accepting new entries — it has ended.',
       });
+    }
+
+    // Block new entries if max_entries cap is reached.
+    // Both limits are independent — whichever hits first closes the pack.
+    if (pack.max_entries !== null && pack.max_entries !== undefined) {
+      const currentEntries = pack.current_entries || 0;
+      if (currentEntries >= pack.max_entries) {
+        return res.status(410).json({
+          success: false,
+          code: 'ENTRY_CAP_REACHED',
+          error: `This pack has reached its maximum entries (${pack.max_entries}). It is now closed.`,
+          current_entries: currentEntries,
+          max_entries: pack.max_entries,
+        });
+      }
     }
 
     // Fetch ALL non-deleted pills from the bank — regardless of status.

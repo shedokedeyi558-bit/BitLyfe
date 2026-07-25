@@ -115,7 +115,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     // Fetch pack — must be special type and active
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at')
+      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, max_entries, current_entries')
       .eq('id', packId)
       .single();
 
@@ -221,14 +221,27 @@ router.post('/start', idempotency(), auth, async (req, res) => {
 
     // New attempt — validate question bank
     // Block new entries if quiz_expires_at has passed.
-    // Already in-progress attempts (resumed above) are unaffected — only new entries are blocked.
-    // This is independent of entry_window_end (Time Machine / predictions field — do not touch).
     if (pack.quiz_expires_at && new Date(pack.quiz_expires_at) < new Date()) {
       return res.status(410).json({
         success: false,
         code: 'QUIZ_EXPIRED',
         error: 'This pack is no longer accepting new entries — it has ended.',
       });
+    }
+
+    // Block new entries if max_entries cap is reached.
+    // Both limits are independent — whichever hits first closes the pack.
+    if (pack.max_entries !== null && pack.max_entries !== undefined) {
+      const currentEntries = pack.current_entries || 0;
+      if (currentEntries >= pack.max_entries) {
+        return res.status(410).json({
+          success: false,
+          code: 'ENTRY_CAP_REACHED',
+          error: `This pack has reached its maximum entries (${pack.max_entries}). It is now closed.`,
+          current_entries: currentEntries,
+          max_entries: pack.max_entries,
+        });
+      }
     }
 
     const { data: bankPills, error: bankErr } = await supabase
@@ -308,6 +321,14 @@ router.post('/start', idempotency(), auth, async (req, res) => {
 
     const pills = await getPillsByIds(selectedIds);
 
+    // Increment current_entries counter (fire-and-forget — never blocks the response)
+    if (pack.max_entries !== null && pack.max_entries !== undefined) {
+      supabase.from('pill_packs')
+        .update({ current_entries: (pack.current_entries || 0) + 1 })
+        .eq('id', packId)
+        .catch(() => {});
+    }
+
     return res.status(201).json({
       success: true,
       resumed: false,
@@ -317,6 +338,9 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       total_time_seconds: totalTimeSecs,
       required_correct: pack.required_correct || effectiveQuestionCount,
       time_remaining_seconds: totalTimeSecs,
+      // entry cap info for the frontend
+      current_entries: (pack.current_entries || 0) + 1,
+      max_entries: pack.max_entries || null,
       newBalance: billing ? billing.newBalance : player.balance,
       newBonusBalance: billing ? billing.newBonusBalance : (player.bonus_balance || 0),
       bonusUsed: billing ? billing.bonusUsed : 0,

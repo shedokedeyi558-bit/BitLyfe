@@ -277,6 +277,9 @@ ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS total_time_seconds INTEGER;
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS required_correct INTEGER;
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS entry_window_end TIMESTAMP WITH TIME ZONE;
 ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS is_featured BOOLEAN DEFAULT false;
+-- Entry cap for Specials packs (Specials-only; null for standard packs, meaning no cap)
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS max_entries INTEGER;
+ALTER TABLE pill_packs ADD COLUMN IF NOT EXISTS current_entries INTEGER DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_pill_packs_status ON pill_packs(status);
 
