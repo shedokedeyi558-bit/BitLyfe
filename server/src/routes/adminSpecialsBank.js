@@ -220,6 +220,11 @@ router.get('/packs/:packId', async (req, res) => {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+/** Normalize question text for duplicate detection (trim + lowercase). */
+function normalizeQuestion(text) {
+  return (text || '').trim().toLowerCase();
+}
+
 /** Validate and normalise a single raw question row from CSV or JSON import. */
 function normaliseRow(raw, index) {
   const question      = (raw.question || raw.text || '').trim();
@@ -297,6 +302,14 @@ async function requireSpecialsPack(packId) {
  */
 router.post('/packs/:packId/import', upload.single('file'), async (req, res) => {
   try {
+    console.log('[packs/:packId/import] Called with:', {
+      packId: req.params.packId,
+      has_file: !!req.file,
+      body_questions_type: Array.isArray(req.body.questions) ? 'array' : typeof req.body.questions,
+      body_questions_length: Array.isArray(req.body.questions) ? req.body.questions.length : 'N/A',
+      body_keys: Object.keys(req.body),
+    });
+
     const pack = await requireSpecialsPack(req.params.packId).catch((err) =>
       res.status(err.status || 500).json({ success: false, error: err.message })
     );
@@ -374,10 +387,21 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
     });
     if (!targetPack) return;
 
+    // Fetch existing questions in target pack for duplicate detection
+    const { data: existingQuestions } = await supabase
+      .from('pills')
+      .select('question')
+      .eq('pack_id', packId)
+      .is('deleted_at', null);
+
+    const existingQuestionNorms = new Set(
+      (existingQuestions || []).map((q) => normalizeQuestion(q.question))
+    );
+
     // Fetch source questions (non-deleted, available or expired — clone all states)
     let query = supabase
       .from('pills')
-      .select('question, format, options, correct_answer, case_sensitive, timer_seconds, color')
+      .select('question, format, options, correct_answer, case_sensitive, color')
       .eq('pack_id', sourcePackId)
       .is('deleted_at', null);
 
@@ -391,10 +415,42 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
       return res.status(404).json({ success: false, error: 'No questions found in source pack' });
     }
 
+    // Filter for duplicates
+    const toClone = [];
+    const skipped = [];
+
+    for (const row of sourceRows) {
+      const normQuest = normalizeQuestion(row.question);
+      if (existingQuestionNorms.has(normQuest)) {
+        skipped.push({
+          question: row.question,
+          reason: 'Already exists in target pack',
+        });
+      } else {
+        toClone.push(row);
+      }
+    }
+
+    // If nothing to clone after dedup
+    if (toClone.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          cloned: 0,
+          skipped: skipped.length,
+          duplicates: skipped,
+          source_pack_id: sourcePackId,
+          target_pack_id: packId,
+          questions: [],
+          message: `All ${skipped.length} selected questions already exist in the target pack.`,
+        },
+      });
+    }
+
     const resolvedFee   = targetPack.entry_fee !== null ? Number(targetPack.entry_fee)  : 0;
     const resolvedPrize = targetPack.prize      !== null ? Number(targetPack.prize)      : 0;
 
-    const toInsert = sourceRows.map((q) => ({
+    const toInsert = toClone.map((q) => ({
       admin_id:       req.admin?.id || null,
       pack_id:        packId,
       question:       q.question,
@@ -402,12 +458,10 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
       options:        q.options,
       correct_answer: q.correct_answer,
       case_sensitive: q.case_sensitive,
-      timer_seconds:  q.timer_seconds,
       color:          q.color,
       entry_fee:      resolvedFee,
       prize:          resolvedPrize,
       status:         'available',
-      // stats reset to zero — new independent rows
       times_answered: 0,
       times_correct:  0,
     }));
@@ -415,13 +469,20 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
     const { data, error } = await supabase.from('pills').insert(toInsert).select();
     if (error) return res.status(500).json({ success: false, error: 'Clone failed: ' + error.message });
 
+    console.log(`[clone-from-pack] Cloned ${data.length}, skipped ${skipped.length} duplicates`);
+
     return res.status(201).json({
       success: true,
       data: {
         cloned: data.length,
+        skipped: skipped.length,
+        duplicates: skipped,
         source_pack_id: sourcePackId,
         target_pack_id: packId,
         questions: data,
+        message: skipped.length > 0
+          ? `${data.length} cloned, ${skipped.length} skipped as duplicates already in target pack.`
+          : `${data.length} cloned successfully.`,
       },
     });
   } catch (err) {
@@ -618,6 +679,13 @@ router.delete('/library/:id', async (req, res) => {
  */
 router.post('/library/import', upload.single('file'), async (req, res) => {
   try {
+    console.log('[library/import] Called with:', {
+      has_file: !!req.file,
+      body_questions_type: Array.isArray(req.body.questions) ? 'array' : typeof req.body.questions,
+      body_questions_length: Array.isArray(req.body.questions) ? req.body.questions.length : 'N/A',
+      body_keys: Object.keys(req.body),
+    });
+
     const rawRows = parseInput(req.file, req.body.questions);
     if (!rawRows.length) {
       return res.status(400).json({ success: false, error: 'No questions provided' });
@@ -667,9 +735,157 @@ router.post('/library/import', upload.single('file'), async (req, res) => {
  *
  * Response: { success, data: { copied: N, pack_id, questions: [...] } }
  */
+router.post('/library/importFromLibrary', async (req, res) => {
+  try {
+    const { question_ids, pack_id } = req.body;
+
+    console.log('[library/importFromLibrary] Import with duplicate detection:', {
+      question_ids_count: Array.isArray(question_ids) ? question_ids.length : 0,
+      pack_id,
+    });
+
+    if (!pack_id) {
+      return res.status(400).json({ success: false, error: 'pack_id is required' });
+    }
+    if (!Array.isArray(question_ids) || question_ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'question_ids must be a non-empty array' });
+    }
+
+    // Confirm target is a Specials pack
+    const pack = await requireSpecialsPack(pack_id).catch((err) => {
+      res.status(err.status || 500).json({ success: false, error: err.message });
+      return null;
+    });
+    if (!pack) return;
+
+    // Fetch existing questions in the target pack for duplicate detection
+    const { data: existingQuestions } = await supabase
+      .from('pills')
+      .select('question')
+      .eq('pack_id', pack_id)
+      .is('deleted_at', null);
+
+    const existingQuestionNorms = new Set(
+      (existingQuestions || []).map((q) => normalizeQuestion(q.question))
+    );
+
+    // Fetch the requested draft questions (non-deleted only)
+    const draftResults = await Promise.all(
+      question_ids.map((qid) =>
+        supabase
+          .from('draft_question_library')
+          .select('id, question, format, options, correct_answer, case_sensitive, color')
+          .eq('id', qid)
+          .is('deleted_at', null)
+          .maybeSingle()
+          .then(({ data }) => data)
+      )
+    );
+    const drafts = draftResults.filter(Boolean);
+
+    if (drafts.length === 0) {
+      return res.status(404).json({ success: false, error: 'No matching non-deleted library questions found' });
+    }
+
+    // Filter for duplicates
+    const toImport = [];
+    const skipped = [];
+
+    for (const draft of drafts) {
+      const normQuest = normalizeQuestion(draft.question);
+      if (existingQuestionNorms.has(normQuest)) {
+        skipped.push({
+          id: draft.id,
+          question: draft.question,
+          reason: 'Already exists in this pack',
+        });
+      } else {
+        toImport.push(draft);
+      }
+    }
+
+    // If nothing to import after dedup
+    if (toImport.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          imported: 0,
+          skipped: skipped.length,
+          duplicates: skipped,
+          pack_id,
+          questions: [],
+          message: `All ${skipped.length} selected questions already exist in this pack.`,
+        },
+      });
+    }
+
+    const resolvedFee   = pack.entry_fee !== null ? Number(pack.entry_fee)  : 0;
+    const resolvedPrize = pack.prize      !== null ? Number(pack.prize)      : 0;
+
+    const toInsert = toImport.map((q) => ({
+      admin_id:       req.admin?.id || null,
+      pack_id:        pack_id,
+      question:       q.question,
+      format:         q.format,
+      options:        q.options,
+      correct_answer: q.correct_answer,
+      case_sensitive: q.case_sensitive,
+      color:          q.color,
+      entry_fee:      resolvedFee,
+      prize:          resolvedPrize,
+      status:         'available',
+      times_answered: 0,
+      times_correct:  0,
+    }));
+
+    const { data, error } = await supabase.from('pills').insert(toInsert).select();
+    if (error) return res.status(500).json({ success: false, error: 'Copy failed: ' + error.message });
+
+    console.log(`[library/importFromLibrary] Imported ${data.length}, skipped ${skipped.length} duplicates`);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        imported: data.length,
+        skipped: skipped.length,
+        duplicates: skipped,
+        pack_id,
+        questions: data,
+        message: skipped.length > 0 
+          ? `${data.length} imported, ${skipped.length} skipped as duplicates already in this pack.`
+          : `${data.length} imported successfully.`,
+      },
+    });
+  } catch (err) {
+    console.error('Library importFromLibrary error:', err);
+    return res.status(500).json({ success: false, error: 'Copy failed' });
+  }
+});
+
+/**
+ * POST /api/admin/specials-bank/library/copy-to-pack
+ * Copy selected draft library questions into a Specials pack bank as
+ * fully independent rows. Library originals are never modified or consumed —
+ * the same drafts can be copied to multiple packs.
+ *
+ * Body: {
+ *   question_ids: ["uuid1", "uuid2", ...],   // required — draft IDs to copy
+ *   pack_id: "uuid"                           // required — target pack
+ * }
+ *
+ * Response: { success, data: { copied: N, pack_id, questions: [...] } }
+ */
 router.post('/library/copy-to-pack', async (req, res) => {
   try {
     const { question_ids, pack_id } = req.body;
+
+    // Log for diagnostics
+    console.log('[copy-to-pack] Request received:', {
+      question_ids_type: Array.isArray(question_ids) ? 'array' : typeof question_ids,
+      question_ids_length: Array.isArray(question_ids) ? question_ids.length : 'N/A',
+      pack_id_type: typeof pack_id,
+      body_keys: Object.keys(req.body),
+    });
 
     if (!pack_id) {
       return res.status(400).json({ success: false, error: 'pack_id is required' });
