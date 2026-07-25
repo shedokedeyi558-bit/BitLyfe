@@ -172,11 +172,9 @@ router.get('/packs/:packId', async (req, res) => {
   try {
     const { packId } = req.params;
 
+    // Use RPC to bypass stale PostgREST schema cache
     const { data: pack, error: packErr } = await supabase
-      .from('pill_packs')
-      .select('*')
-      .eq('id', packId)
-      .single();
+      .rpc('admin_get_pill_pack', { p_id: packId });
 
     if (packErr || !pack) {
       return res.status(404).json({ success: false, error: 'Pack not found' });

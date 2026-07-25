@@ -99,16 +99,16 @@ router.get('/packs', auth, async (req, res) => {
   try {
     const playerId = req.player.id;
 
-    // Fetch all active packs — standard and specials together.
-    // Frontend uses is_vip / pack_type to distinguish specials from standard packs.
-    // Include all Specials-related fields so the pre-payment screen can render
-    // the correct challenge phrase without a separate request.
-    const { data: packs, error: packsErr } = await supabase
-      .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, is_featured, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at')
-      .eq('status', 'active')
-      .order('is_featured', { ascending: false })  // featured pack sorts first
-      .order('created_at', { ascending: false });
+    // Fetch all active packs — use RPC to bypass stale PostgREST schema cache.
+    // quiz_expires_at and other recently-added columns cause PGRST204 with direct selects.
+    const { data: allPacksData, error: packsErr } = await supabase
+      .rpc('get_active_standard_packs');
+
+    // Also fetch specials separately so we can merge them
+    const { data: specialPacksData } = await supabase
+      .rpc('get_active_special_packs');
+
+    const packs = [...(allPacksData || []), ...(specialPacksData || [])];
 
     if (packsErr) {
       return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
@@ -250,12 +250,9 @@ router.get('/packs', auth, async (req, res) => {
  */
 router.get('/specials', auth, async (req, res) => {
   try {
+    // Use RPC to bypass stale PostgREST schema cache
     const { data: packs, error } = await supabase
-      .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at')
-      .eq('status', 'active')
-      .or('pack_type.eq.special,is_vip.eq.true')
-      .order('created_at', { ascending: false });
+      .rpc('get_active_special_packs');
 
     if (error) {
       return res.status(500).json({ success: false, error: 'Failed to fetch specials' });
@@ -464,11 +461,9 @@ router.post('/open', idempotency(), auth, async (req, res) => {
     // Resolve entry_fee: use pack-level if pill belongs to a pack with one set
     let entryFee = parseFloat(pill.entry_fee);
     if (pill.pack_id) {
+      // Use RPC to bypass stale PostgREST schema cache (quiz_expires_at is a new column)
       const { data: pack } = await supabase
-        .from('pill_packs')
-        .select('entry_fee, prize, quiz_expires_at')
-        .eq('id', pill.pack_id)
-        .single();
+        .rpc('get_pill_pack_for_entry', { p_id: pill.pack_id });
 
       // Block new opens if the pack's quiz_expires_at has passed.
       // Independent of entry_window_end — that field is for Time Machine/predictions only.

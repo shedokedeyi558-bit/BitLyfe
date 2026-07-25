@@ -30,10 +30,9 @@ router.use(adminAuth);
  */
 router.get('/packs', async (req, res) => {
   try {
-    const { data: packs, error: packsErr } = await supabase
-      .from('pill_packs')
-      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, current_entries, is_featured, created_at')
-      .order('created_at', { ascending: false });
+    // Use RPC to bypass PostgREST schema cache — direct .select() on pill_packs
+    // fails with PGRST204 because the cache is stale (missing recently-added columns).
+    const { data: packs, error: packsErr } = await supabase.rpc('admin_get_pill_packs');
 
     if (packsErr) return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
 
@@ -999,12 +998,9 @@ router.get('/packs/:packId/pills', async (req, res) => {
     const { page = 1, limit = 20, status, sort_by, sort_order } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    // Confirm pack exists
+    // Confirm pack exists — use RPC to bypass stale schema cache
     const { data: pack, error: packErr } = await supabase
-      .from('pill_packs')
-      .select('id, name, question_count, pack_type, is_vip, target_bank_size')
-      .eq('id', packId)
-      .single();
+      .rpc('admin_get_pill_pack', { p_id: packId });
 
     if (packErr || !pack) {
       return res.status(404).json({ success: false, error: 'Pack not found' });

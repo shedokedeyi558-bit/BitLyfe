@@ -112,12 +112,9 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'packId is required' });
     }
 
-    // Fetch pack — must be special type and active
+    // Fetch pack — use RPC to bypass stale PostgREST schema cache
     const { data: pack, error: packErr } = await supabase
-      .from('pill_packs')
-      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, quiz_expires_at, max_entries, current_entries')
-      .eq('id', packId)
-      .single();
+      .rpc('get_pill_pack_for_entry', { p_id: packId });
 
     if (packErr || !pack) {
       return res.status(404).json({ success: false, error: 'Pack not found' });
@@ -343,10 +340,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
 
     // Increment current_entries counter (fire-and-forget — never blocks the response)
     if (pack.max_entries !== null && pack.max_entries !== undefined) {
-      supabase.from('pill_packs')
-        .update({ current_entries: (pack.current_entries || 0) + 1 })
-        .eq('id', packId)
-        .catch(() => {});
+      supabase.rpc('increment_pack_entries', { p_id: packId }).catch(() => {});
     }
 
     return res.status(201).json({
