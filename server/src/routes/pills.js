@@ -263,10 +263,8 @@ router.get('/specials', auth, async (req, res) => {
 
     const now = new Date();
     const activePacks = (packs || []).filter((p) => {
-      // Filter out packs whose entry_window_end has passed (legacy Time Machine check)
-      if (p.entry_window_end && new Date(p.entry_window_end) <= now) return false;
       // Filter out packs whose quiz_expires_at has passed (Pills/Specials expiry)
-      // Independent of entry_window_end — different field, different purpose.
+      // entry_window_end is for Time Machine/predictions only — never used for Specials
       if (p.quiz_expires_at && new Date(p.quiz_expires_at) <= now) return false;
       return true;
     });

@@ -115,7 +115,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     // Fetch pack — must be special type and active
     const { data: pack, error: packErr } = await supabase
       .from('pill_packs')
-      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, max_entries, current_entries')
+      .select('id, name, entry_fee, prize, status, pack_type, is_vip, question_count, total_time_seconds, required_correct, quiz_expires_at, max_entries, current_entries')
       .eq('id', packId)
       .single();
 
@@ -132,9 +132,29 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       return res.status(409).json({ success: false, error: 'Special pack is not currently active' });
     }
 
-    // Check entry window
-    if (pack.entry_window_end && new Date(pack.entry_window_end) < new Date()) {
-      return res.status(409).json({ success: false, code: 'ENTRY_CLOSED', error: 'Entry window for this special has closed' });
+    // Block new entries if quiz_expires_at has passed.
+    // In-progress attempts are NOT affected — only new entries.
+    if (pack.quiz_expires_at && new Date(pack.quiz_expires_at) < new Date()) {
+      return res.status(410).json({
+        success: false,
+        code: 'QUIZ_EXPIRED',
+        error: 'This pack is no longer accepting new entries — it has ended.',
+      });
+    }
+
+    // Block new entries if max_entries cap is reached.
+    // Both limits are independent — whichever hits first closes the pack.
+    if (pack.max_entries !== null && pack.max_entries !== undefined) {
+      const currentEntries = pack.current_entries || 0;
+      if (currentEntries >= pack.max_entries) {
+        return res.status(410).json({
+          success: false,
+          code: 'ENTRY_CAP_REACHED',
+          error: `This pack has reached its maximum entries (${pack.max_entries}). It is now closed.`,
+          current_entries: currentEntries,
+          max_entries: pack.max_entries,
+        });
+      }
     }
 
     const questionCount = pack.question_count || null;  // null = use all available pills
