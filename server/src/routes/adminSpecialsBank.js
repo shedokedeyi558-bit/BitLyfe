@@ -238,13 +238,23 @@ function normaliseRow(raw, index) {
     try { options = JSON.parse(options); } catch { options = null; }
   }
 
+  // timer_seconds is now optional for library questions (frontend no longer sends it).
+  // If provided in import, use it; otherwise leave as null/undefined.
+  // Do NOT default to 30 anymore — library questions don't use per-question timers.
+  let timer_seconds = null;
+  if (raw.timer_seconds !== undefined && raw.timer_seconds !== null && raw.timer_seconds !== '') {
+    timer_seconds = Number(raw.timer_seconds);
+  } else if (raw.timer !== undefined && raw.timer !== null && raw.timer !== '') {
+    timer_seconds = Number(raw.timer);
+  }
+
   return {
     question,
     format,
     options:        options || null,
     correct_answer,
     case_sensitive: raw.case_sensitive === true || raw.case_sensitive === 'true',
-    timer_seconds:  raw.timer_seconds  ? Number(raw.timer_seconds)  : (raw.timer ? Number(raw.timer) : 30),
+    timer_seconds:  timer_seconds,  // Now null if not provided, instead of defaulting to 30
     color:          raw.color || '#8B5CF6',
   };
 }
@@ -483,20 +493,29 @@ router.post('/library', async (req, res) => {
       return res.status(400).json({ success: false, error: 'format must be multiple_choice or type_answer' });
     }
 
+    // timer_seconds is now optional (frontend no longer sends it for library questions).
+    // If provided, use it; otherwise store null (no per-question timer for library).
+    // Library questions are never used outside Specials packs anyway (which use pack-level time limit).
+    const insertData = {
+      admin_id:       req.admin?.id || null,
+      question:       question.trim(),
+      format:         fmt,
+      options:        options || null,
+      correct_answer: correct_answer.trim(),
+      case_sensitive: case_sensitive ?? false,
+      color:          color || '#8B5CF6',
+      label:          label || null,
+      note:           note  || null,
+    };
+    
+    // Only include timer_seconds if explicitly provided (not undefined/null)
+    if (timer_seconds !== undefined && timer_seconds !== null) {
+      insertData.timer_seconds = Number(timer_seconds);
+    }
+
     const { data, error } = await supabase
       .from('draft_question_library')
-      .insert({
-        admin_id:       req.admin?.id || null,
-        question:       question.trim(),
-        format:         fmt,
-        options:        options || null,
-        correct_answer: correct_answer.trim(),
-        case_sensitive: case_sensitive ?? false,
-        timer_seconds:  timer_seconds  ? Number(timer_seconds) : 30,
-        color:          color || '#8B5CF6',
-        label:          label || null,
-        note:           note  || null,
-      })
+      .insert(insertData)
       .select()
       .single();
 
