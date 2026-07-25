@@ -212,19 +212,16 @@ router.post('/packs', async (req, res) => {
         total_time_seconds: isSpecial ? Number(total_time_seconds) : null,
         required_correct: isSpecial ? Number(required_correct) : null,
         entry_window_end: isSpecial && entry_window_end ? new Date(entry_window_end).toISOString() : null,
-        // quiz_expires_at: Pills/Specials-only expiry — independent of entry_window_end
         quiz_expires_at: quiz_expires_at ? new Date(quiz_expires_at).toISOString() : null,
-        // target_bank_size: Specials-only informational target — does not affect activation
         target_bank_size: isSpecial && target_bank_size !== undefined && target_bank_size !== null
           ? Number(target_bank_size)
           : null,
-        // max_entries: Specials-only entry cap (independent of quiz_expires_at)
         max_entries: isSpecial && max_entries !== undefined && max_entries !== null
           ? Number(max_entries)
           : null,
-        current_entries: 0,  // Initialize entry counter
+        // current_entries: omit — will default to 0 in DB (avoids schema cache issues)
       })
-      .select()
+      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
       .single();
 
     if (error) {
@@ -286,7 +283,7 @@ router.put('/packs/:packId/feature', async (req, res) => {
       .from('pill_packs')
       .update({ is_featured: Boolean(featured) })
       .eq('id', packId)
-      .select()
+      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
       .single();
 
     if (updateErr) {
@@ -405,7 +402,7 @@ router.put('/packs/:packId', async (req, res) => {
             .from('pill_packs')
             .update({ ...updates })
             .eq('id', packId)
-            .select()
+            .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
             .single();
 
           if (updateErr || !updated) return res.status(404).json({ success: false, error: 'Pack not found or update failed' });
@@ -418,7 +415,7 @@ router.put('/packs/:packId', async (req, res) => {
       .from('pill_packs')
       .update(updates)
       .eq('id', packId)
-      .select()
+      .select('id, name, category, status, entry_fee, prize, is_vip, pack_type, question_count, total_time_seconds, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, is_featured, created_at')
       .single();
 
     if (error || !data) return res.status(404).json({ success: false, error: 'Pack not found or update failed' });
