@@ -32,11 +32,19 @@ router.get('/packs', async (req, res) => {
   try {
     // Use RPC to bypass PostgREST schema cache — direct .select() on pill_packs
     // fails with PGRST204 because the cache is stale (missing recently-added columns).
-    const { data: packs, error: packsErr } = await supabase.rpc('admin_get_pill_packs');
+    const { data: packsRaw, error: packsErr } = await supabase.rpc('admin_get_pill_packs');
 
-    if (packsErr) return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
+    if (packsErr) {
+      console.error('GET /packs RPC error:', { code: packsErr.code, message: packsErr.message, details: packsErr.details, hint: packsErr.hint });
+      return res.status(500).json({ success: false, error: 'Failed to fetch packs', details: packsErr.message });
+    }
 
-    const packIds = (packs || []).map((p) => p.id);
+    // admin_get_pill_packs returns JSON array (json_agg result).
+    // Supabase RPC wraps it: data = the JSON value directly (array or null).
+    console.log('GET /packs RPC raw type:', typeof packsRaw, Array.isArray(packsRaw) ? `array[${packsRaw.length}]` : packsRaw === null ? 'null' : 'object');
+    const packs = Array.isArray(packsRaw) ? packsRaw : (packsRaw ? [packsRaw] : []);
+
+    const packIds = packs.map((p) => p.id);
     let pills = [];
 
     if (packIds.length > 0) {
