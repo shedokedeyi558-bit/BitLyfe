@@ -674,6 +674,9 @@ router.get('/stats', async (req, res) => {
  * GET /api/admin/pills/packs/attempt-stats
  * Real-time counts of in-progress, won (passed), and lost (failed) attempts.
  *
+ * For Special/VIP packs: Returns stats from special_attempts table
+ * For Standard packs: Returns stats from pill_plays table
+ *
  * Query params:
  *   ?pack_id=<uuid>   — stats for a single pack (optional)
  *                       omit to get aggregated stats across ALL active packs
@@ -683,6 +686,7 @@ router.get('/packs/attempt-stats', async (req, res) => {
     const { pack_id } = req.query;
 
     let targetPackIds = null;
+    let packTypes = {};  // Track pack_type for each pack
 
     if (pack_id) {
       const { data: pack, error: packErr } = await supabase
@@ -696,39 +700,93 @@ router.get('/packs/attempt-stats', async (req, res) => {
       }
 
       targetPackIds = [pack_id];
+      packTypes[pack_id] = pack.pack_type || 'standard';
     } else {
       const { data: packs, error: packsErr } = await supabase
         .from('pill_packs')
-        .select('id')
-        .eq('status', 'active')
-        .or('pack_type.eq.special,is_vip.eq.true');
+        .select('id, pack_type, is_vip')
+        .eq('status', 'active');
 
       if (packsErr) {
         return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
       }
 
       targetPackIds = (packs || []).map((p) => p.id);
+      for (const p of (packs || [])) {
+        packTypes[p.id] = p.pack_type || 'standard';
+      }
     }
 
     if (targetPackIds.length === 0) {
       return res.json({
         success: true,
         data: {
-          totals: { in_progress: 0, passed: 0, failed: 0, total_completed: 0, win_rate: null },
+          totals: { live: 0, won: 0, lost: 0, total: 0, win_rate: null },
           by_pack: [],
         },
       });
     }
 
-    const { data: attempts, error: attemptsErr } = await supabase
-      .from('special_attempts')
-      .select('pack_id, status')
-      .in('pack_id', targetPackIds);
+    // ── Separate packs by type ───────────────────────────────────────────────
+    const specialPackIds = targetPackIds.filter((id) => packTypes[id] === 'special');
+    const standardPackIds = targetPackIds.filter((id) => packTypes[id] === 'standard' || !packTypes[id]);
 
-    if (attemptsErr) {
-      return res.status(500).json({ success: false, error: 'Failed to fetch attempt data' });
+    // ── Query stats for special/VIP packs from special_attempts ───────────────
+    let specialAttempts = [];
+    if (specialPackIds.length > 0) {
+      const { data: attempts, error: attemptsErr } = await supabase
+        .from('special_attempts')
+        .select('pack_id, status')
+        .in('pack_id', specialPackIds);
+
+      if (attemptsErr) {
+        return res.status(500).json({ success: false, error: 'Failed to fetch special attempt data' });
+      }
+
+      specialAttempts = attempts || [];
     }
 
+    // ── Query stats for standard packs from pill_plays ─────────────────────────
+    let standardPlays = [];
+    if (standardPackIds.length > 0) {
+      // Get all pills for standard packs, then get their plays
+      const { data: pills, error: pillsErr } = await supabase
+        .from('pills')
+        .select('id, pack_id')
+        .in('pack_id', standardPackIds);
+
+      if (pillsErr) {
+        return res.status(500).json({ success: false, error: 'Failed to fetch pills' });
+      }
+
+      const pillIds = (pills || []).map((p) => p.id);
+
+      if (pillIds.length > 0) {
+        const { data: plays, error: playsErr } = await supabase
+          .from('pill_plays')
+          .select('pill_id, won')
+          .in('pill_id', pillIds);
+
+        if (playsErr) {
+          return res.status(500).json({ success: false, error: 'Failed to fetch plays' });
+        }
+
+        // Map plays back to packs
+        const pillToPack = {};
+        for (const p of pills) {
+          pillToPack[p.id] = p.pack_id;
+        }
+
+        for (const play of (plays || [])) {
+          standardPlays.push({
+            pack_id: pillToPack[play.pill_id],
+            won: play.won,
+          });
+        }
+      }
+    }
+
+    // ── Fetch pack metadata ──────────────────────────────────────────────────
     const packMetaResults = await Promise.all(
       targetPackIds.map((pid) =>
         supabase
@@ -743,54 +801,74 @@ router.get('/packs/attempt-stats', async (req, res) => {
     const packMeta = {};
     for (const p of packMetaResults.filter(Boolean)) packMeta[p.id] = p;
 
+    // ── Aggregate stats by pack ──────────────────────────────────────────────
     const byPack = {};
     for (const id of targetPackIds) {
-      byPack[id] = { in_progress: 0, passed: 0, failed: 0 };
+      byPack[id] = {
+        live: 0,
+        won: 0,
+        lost: 0,
+        type: packTypes[id] || 'standard',
+      };
     }
 
-    for (const attempt of attempts || []) {
+    // Add special attempt stats
+    for (const attempt of specialAttempts) {
       const bucket = byPack[attempt.pack_id];
       if (!bucket) continue;
-      if (attempt.status === 'in_progress') bucket.in_progress++;
-      else if (attempt.status === 'passed')  bucket.passed++;
-      else if (attempt.status === 'failed')  bucket.failed++;
+      if (attempt.status === 'in_progress') bucket.live++;
+      else if (attempt.status === 'passed')  bucket.won++;
+      else if (attempt.status === 'failed')  bucket.lost++;
+    }
+
+    // Add standard play stats
+    for (const play of standardPlays) {
+      const bucket = byPack[play.pack_id];
+      if (!bucket) continue;
+      if (play.won) {
+        bucket.won++;
+      } else {
+        bucket.lost++;
+      }
     }
 
     const byPackResult = targetPackIds.map((id) => {
       const counts = byPack[id];
       const meta = packMeta[id] || {};
-      const total_completed = counts.passed + counts.failed;
-      const win_rate = total_completed > 0
-        ? parseFloat((counts.passed / total_completed).toFixed(4))
+      const total = counts.won + counts.lost;
+      const win_rate = total > 0
+        ? parseFloat((counts.won / total).toFixed(4))
         : null;
 
       return {
         pack_id: id,
         pack_name: meta.name || null,
+        pack_type: counts.type,
         required_correct: meta.required_correct || null,
         question_count: meta.question_count || null,
-        in_progress: counts.in_progress,
-        passed: counts.passed,
-        failed: counts.failed,
-        total_completed,
+        live: counts.live,
+        won: counts.won,
+        lost: counts.lost,
+        total,
         win_rate,
       };
     });
 
+    // ── Calculate totals ─────────────────────────────────────────────────────
     const totals = byPackResult.reduce(
       (acc, row) => {
-        acc.in_progress += row.in_progress;
-        acc.passed      += row.passed;
-        acc.failed      += row.failed;
+        acc.live += row.live;
+        acc.won  += row.won;
+        acc.lost += row.lost;
         return acc;
       },
-      { in_progress: 0, passed: 0, failed: 0 }
+      { live: 0, won: 0, lost: 0 }
     );
 
-    const total_completed = totals.passed + totals.failed;
-    totals.total_completed = total_completed;
-    totals.win_rate = total_completed > 0
-      ? parseFloat((totals.passed / total_completed).toFixed(4))
+    const total = totals.won + totals.lost;
+    totals.total = total;
+    totals.win_rate = total > 0
+      ? parseFloat((totals.won / total).toFixed(4))
       : null;
 
     return res.json({ success: true, data: { totals, by_pack: byPackResult } });
