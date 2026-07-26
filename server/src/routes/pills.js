@@ -294,6 +294,7 @@ router.get('/specials', auth, async (req, res) => {
     // Fetch live available pill counts for all these packs in one query
     const packIds = activePacks.map((p) => p.id);
     let availableCountByPack = {};
+    let userAttemptedByPack = {};
 
     if (packIds.length > 0) {
       const { data: pillCounts } = await supabase
@@ -304,6 +305,18 @@ router.get('/specials', auth, async (req, res) => {
 
       for (const row of pillCounts || []) {
         availableCountByPack[row.pack_id] = (availableCountByPack[row.pack_id] || 0) + 1;
+      }
+
+      // Check which packs the current player has completed attempts on
+      const { data: completedAttempts } = await supabase
+        .from('special_attempts')
+        .select('pack_id')
+        .eq('player_id', req.player.id)
+        .in('pack_id', packIds)
+        .in('status', ['passed', 'failed']);
+
+      for (const attempt of completedAttempts || []) {
+        userAttemptedByPack[attempt.pack_id] = true;
       }
     }
 
@@ -339,6 +352,10 @@ router.get('/specials', auth, async (req, res) => {
         available_question_count: availableCountByPack[p.id] || 0,
         // quiz_expires_at: Pills/Specials-only expiry — independent of entry_window_end
         quiz_expires_at: p.quiz_expires_at || null,
+
+        // ── Player progress / badge fields ───────────────────────────────────
+        // user_attempted: true if this player has a completed attempt (passed or failed)
+        user_attempted: !!userAttemptedByPack[p.id],
       };
     });
 
