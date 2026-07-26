@@ -210,6 +210,97 @@ function secondsRemaining(startedAt, totalTimeSeconds) {
   return Math.max(0, totalTimeSeconds - elapsed);
 }
 
+/**
+ * Smart question selection for Specials exams.
+ *
+ * Priority: unseen questions first, then already-seen ones (shuffled).
+ * Full reset: if the player has seen every question in the bank, clears
+ * their history and starts fresh again.
+ *
+ * New questions added by admin are automatically included in the unseen
+ * pool on the player's next attempt — no special detection needed.
+ *
+ * Also records the selected questions in specials_question_history so
+ * the next attempt knows what this player has already seen.
+ *
+ * @param {string} packId
+ * @param {string} playerId
+ * @param {number} questionCount  - how many to draw (already validated >= 1)
+ * @param {Array}  bankPills      - [{ id }] — all non-deleted pills for this pack
+ * @returns {string[]} selectedIds — shuffled array of pill UUIDs, length = questionCount
+ */
+async function selectQuestionsForAttempt(packId, playerId, questionCount, bankPills) {
+  const allIds = (bankPills || []).map((p) => p.id);
+
+  // Fetch this player's history for this pack
+  const { data: historyRows, error: histErr } = await supabase
+    .from('specials_question_history')
+    .select('question_id')
+    .eq('pack_id', packId)
+    .eq('player_id', playerId);
+
+  if (histErr) {
+    // If the table doesn't exist yet (migration not run), fall back to plain shuffle
+    if (histErr.code === 'PGRST205' || histErr.message?.includes('schema cache')) {
+      console.warn('[selectQuestions] specials_question_history table not found — falling back to plain shuffle');
+      const fallback = shuffle([...allIds]);
+      return fallback.slice(0, questionCount);
+    }
+    // Any other error — log and fall back rather than blocking entry
+    console.error('[selectQuestions] history fetch error:', histErr.message);
+    const fallback = shuffle([...allIds]);
+    return fallback.slice(0, questionCount);
+  }
+
+  const seenIds = new Set((historyRows || []).map((r) => r.question_id));
+
+  let fresh = allIds.filter((id) => !seenIds.has(id));
+  let stale = allIds.filter((id) =>  seenIds.has(id));
+
+  let selectedIds;
+
+  if (fresh.length === 0 && stale.length > 0) {
+    // Full cycle complete — reset history for this player+pack, start fresh
+    await supabase
+      .from('specials_question_history')
+      .delete()
+      .eq('pack_id', packId)
+      .eq('player_id', playerId);
+    // All questions are now "fresh" again
+    fresh = [...allIds];
+    stale = [];
+  }
+
+  if (fresh.length >= questionCount) {
+    // Plenty of unseen questions — pick randomly from fresh pool only
+    selectedIds = shuffle([...fresh]).slice(0, questionCount);
+  } else {
+    // Some fresh, not enough — take all fresh + fill remainder from shuffled stale
+    const needed = questionCount - fresh.length;
+    selectedIds = shuffle([...fresh, ...shuffle([...stale]).slice(0, needed)]);
+  }
+
+  // Record selected questions in history (upsert — idempotent if attempt is retried)
+  if (selectedIds.length > 0) {
+    const now = new Date().toISOString();
+    const rows = selectedIds.map((qId) => ({
+      pack_id:     packId,
+      player_id:   playerId,
+      question_id: qId,
+      shown_at:    now,
+    }));
+    const { error: upsertErr } = await supabase
+      .from('specials_question_history')
+      .upsert(rows, { onConflict: 'pack_id,player_id,question_id' });
+    if (upsertErr) {
+      // Non-fatal — selection already done, just log
+      console.error('[selectQuestions] history upsert error:', upsertErr.message);
+    }
+  }
+
+  return selectedIds;
+}
+
 // ─── POST /api/pills/vip/start ────────────────────────────────────────────────
 
 /**
@@ -441,10 +532,11 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       }
     }
 
-    // Randomly draw effectiveQuestionCount pills from the bank
-    const allIds = (bankPills || []).map((p) => p.id);
-    shuffle(allIds);
-    const selectedIds = allIds.slice(0, effectiveQuestionCount);
+    // Smart question selection: unseen questions first, then already-seen ones.
+    // Falls back to plain shuffle if migration not yet applied.
+    const selectedIds = await selectQuestionsForAttempt(
+      packId, player.id, effectiveQuestionCount, bankPills
+    );
 
     // Create attempt row in special_attempts
     const { data: attempt, error: attemptErr } = await supabase
