@@ -108,6 +108,43 @@ async function checkSpendLimit(playerId, chargeAmount) {
   return { allowed: true };
 }
 
+/**
+ * Credit a Specials/VIP prize to a player's balance.
+ * Fetches a fresh balance to avoid race conditions, updates the players row,
+ * inserts a specials_win transaction, and returns newBalance.
+ * Throws on any DB failure so the caller can handle it and never silently skip.
+ */
+async function creditSpecialsPrize(playerId, prize, packName) {
+  // Always re-fetch balance immediately before crediting — never trust cached player
+  const { data: fresh, error: fetchErr } = await supabase
+    .from('players')
+    .select('balance')
+    .eq('id', playerId)
+    .single();
+
+  if (fetchErr || !fresh) throw new Error(`creditSpecialsPrize: could not fetch player ${playerId}`);
+
+  const newBalance = Number(fresh.balance || 0) + prize;
+
+  const { error: updateErr } = await supabase
+    .from('players')
+    .update({ balance: newBalance })
+    .eq('id', playerId);
+
+  if (updateErr) throw new Error(`creditSpecialsPrize: balance update failed: ${updateErr.message}`);
+
+  const { error: txnErr } = await supabase.from('transactions').insert({
+    player_id: playerId,
+    type: 'specials_win',
+    amount: prize,
+    description: `Special exam passed: ${packName}`,
+  });
+
+  if (txnErr) throw new Error(`creditSpecialsPrize: transaction insert failed: ${txnErr.message}`);
+
+  return newBalance;
+}
+
 /** Fisher-Yates in-place shuffle */
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -267,15 +304,15 @@ router.post('/start', idempotency(), auth, async (req, res) => {
         let newBalance = player.balance;
         if (passed && pack.prize) {
           const prize = parseFloat(pack.prize);
-          const { data: fresh } = await supabase.from('players').select('balance').eq('id', player.id).single();
-          newBalance = (fresh?.balance || 0) + prize;
-          await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
-          await supabase.from('transactions').insert({
-            player_id: player.id, type: 'pill_win', amount: prize,
-            description: `Passed VIP pack: ${pack.name}`,
-          });
-          await createNotification(player.id, 'win', 'VIP Pack Passed! 🎉',
-            `You passed "${pack.name}" with ${correct_count}/${questionIds.length} correct! ₦${prize.toLocaleString()} credited.`);
+          try {
+            newBalance = await creditSpecialsPrize(player.id, prize, pack.name);
+          } catch (creditErr) {
+            console.error('creditSpecialsPrize (timeout finalize) failed:', creditErr.message);
+            // Attempt is already marked passed — log and continue; do not surface to client
+          }
+          await createNotification(player.id, 'win', 'Special Exam Passed! 🎉',
+            `You passed "${pack.name}" with ${correct_count}/${questionIds.length} correct! ₦${prize.toLocaleString()} credited.`
+          ).catch(() => {});
         }
 
         return res.status(409).json({
@@ -305,7 +342,7 @@ router.post('/start', idempotency(), auth, async (req, res) => {
           required_correct: pack.required_correct || pills.length,
           current_question_index: idx,
           is_new_attempt: false,
-          new_balance: player.balance,
+          new_balance: (await supabase.from('players').select('balance').eq('id', player.id).single().then(r => r.data?.balance)) ?? player.balance,
           exam_duration: existing.total_time_seconds,
           time_remaining_seconds: secsLeft,
           question: sanitize(pills[idx], idx, pills.length),
@@ -616,27 +653,29 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
             p_is_correct: isCorrect,
           })).catch(() => {});
 
-          // Compensating credit: if passed but no pill_win transaction exists, apply credit now
-          let currentBalance = freshPlayer?.balance ?? player.balance;
+          // Compensating credit: if passed but no specials_win transaction exists, apply credit now
+          let currentBalance;
+          const { data: freshBal } = await supabase.from('players').select('balance').eq('id', player.id).single();
+          currentBalance = freshBal?.balance ?? player.balance;
+
           if (passed && prize > 0) {
             const { data: existingTxn } = await supabase
               .from('transactions')
               .select('id')
               .eq('player_id', player.id)
-              .eq('type', 'pill_win')
+              .eq('type', 'specials_win')
               .ilike('description', `%${retryPack?.name || ''}%`)
               .maybeSingle();
 
             if (!existingTxn) {
               console.log(`[vip-replay] applying missed pass credit player=${player.id} prize=${prize}`);
-              const { data: freshPlayer2 } = await supabase.from('players').select('balance').eq('id', player.id).single();
-              currentBalance = (freshPlayer2?.balance || 0) + prize;
-              await supabase.from('players').update({ balance: currentBalance }).eq('id', player.id);
-              await supabase.from('transactions').insert({
-                player_id: player.id, type: 'pill_win', amount: prize,
-                description: `Passed VIP pack (late credit): ${retryPack?.name}`,
-              });
-              await createNotification(player.id, 'win', 'VIP Pack Passed! 🏆',
+              try {
+                currentBalance = await creditSpecialsPrize(player.id, prize, retryPack?.name || attempt.pack_id);
+              } catch (creditErr) {
+                console.error('[vip-replay] compensating credit failed:', creditErr.message);
+                // Don't crash the idempotent replay — return current balance as-is
+              }
+              await createNotification(player.id, 'win', 'Special Exam Passed! 🏆',
                 `₦${prize.toLocaleString()} credited.`).catch(() => {});
             } else {
               const { data: fp } = await supabase.from('players').select('balance').eq('id', player.id).single();
@@ -757,20 +796,22 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
       if (passed && pack?.prize) {
         const prize = parseFloat(pack.prize);
         prizeCredited = prize;
-        const { data: fresh } = await supabase.from('players').select('balance').eq('id', player.id).single();
-        newBalance = (fresh?.balance || 0) + prize;
-        await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);
-        await supabase.from('transactions').insert({
-          player_id: player.id,
-          type: 'pill_win',
-          amount: prize,
-          description: `Passed VIP pack: ${pack.name}`,
-        });
+        try {
+          newBalance = await creditSpecialsPrize(player.id, prize, pack.name);
+        } catch (creditErr) {
+          console.error('creditSpecialsPrize failed — attempt marked passed but balance not updated:', creditErr.message);
+          // Surface the error; do NOT silently swallow. Client will see 500 and can retry.
+          return res.status(500).json({
+            success: false,
+            code: 'PRIZE_CREDIT_FAILED',
+            error: 'Exam passed but prize credit failed — contact support. Your result is saved.',
+          });
+        }
         await createNotification(
           player.id, 'win',
-          'VIP Pack Passed! 🏆',
+          'Special Exam Passed! 🏆',
           `You passed "${pack.name}" with ${correct_count}/${questionIds.length} correct! ₦${prize.toLocaleString()} credited.`
-        );
+        ).catch(() => {});
       }
 
       return res.json({

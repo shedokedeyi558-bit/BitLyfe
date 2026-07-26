@@ -347,7 +347,7 @@ async function computePlayerStats(playerId) {
     .select('type, amount')
     .eq('player_id', playerId);
 
-  const WIN_TYPES   = ['prize', 'pill_win', 'prediction_win', 'blitz_prize', 'challenge_win'];
+  const WIN_TYPES   = ['prize', 'pill_win', 'specials_win', 'prediction_win', 'blitz_prize', 'challenge_win'];
   const ENTRY_TYPES = ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry'];
 
   const entries  = (txns || []).filter((t) => ENTRY_TYPES.includes(t.type));
@@ -430,6 +430,7 @@ router.get('/players/:id/stats', async (req, res) => {
       blitz:       { played: 0, won: 0, total_won: 0 },
       doors:       { played: 0, won: 0, total_won: 0 },
       challenges:  { played: 0, won: 0, total_won: 0 },
+      specials:    { played: 0, won: 0, total_won: 0 },
     };
 
     for (const t of txns || []) {
@@ -444,6 +445,8 @@ router.get('/players/:id/stats', async (req, res) => {
       if (t.type === 'prize')             { byMode.doors.won++; byMode.doors.total_won += amt; }
       if (t.type === 'challenge_entry')   { byMode.challenges.played++; }
       if (t.type === 'challenge_win')     { byMode.challenges.won++; byMode.challenges.total_won += amt; }
+      if (t.type === 'specials_win')      { byMode.specials.won++; byMode.specials.total_won += amt; }
+      // pill_open covers specials entries — already counted in pills.played
     }
 
     return res.json({
@@ -505,19 +508,22 @@ router.get('/players/:id', async (req, res) => {
       blitz:       { played: 0, won: 0, total_won: 0 },
       doors:       { played: 0, won: 0, total_won: 0 },
       challenges:  { played: 0, won: 0, total_won: 0 },
+      specials:    { played: 0, won: 0, total_won: 0 },
     };
     for (const t of txns || []) {
       const amt = Math.abs(t.amount);
       if (t.type === 'pill_open')        { byMode.pills.played++; }
-      if (t.type === 'pill_win')         { byMode.pills.won++;       byMode.pills.total_won += amt; }
+      if (t.type === 'pill_win')         { byMode.pills.won++;         byMode.pills.total_won += amt; }
       if (t.type === 'prediction_enter') { byMode.predictions.played++; }
-      if (t.type === 'prediction_win')   { byMode.predictions.won++; byMode.predictions.total_won += amt; }
+      if (t.type === 'prediction_win')   { byMode.predictions.won++;   byMode.predictions.total_won += amt; }
       if (t.type === 'blitz_entry')      { byMode.blitz.played++; }
-      if (t.type === 'blitz_prize')      { byMode.blitz.won++;       byMode.blitz.total_won += amt; }
+      if (t.type === 'blitz_prize')      { byMode.blitz.won++;         byMode.blitz.total_won += amt; }
       if (t.type === 'entry_fee')        { byMode.doors.played++; }
-      if (t.type === 'prize')            { byMode.doors.won++;        byMode.doors.total_won += amt; }
+      if (t.type === 'prize')            { byMode.doors.won++;          byMode.doors.total_won += amt; }
       if (t.type === 'challenge_entry')  { byMode.challenges.played++; }
-      if (t.type === 'challenge_win')    { byMode.challenges.won++;   byMode.challenges.total_won += amt; }
+      if (t.type === 'challenge_win')    { byMode.challenges.won++;     byMode.challenges.total_won += amt; }
+      if (t.type === 'specials_win')     { byMode.specials.won++;       byMode.specials.total_won += amt; }
+      // pill_open is also used for specials entry — counted in pills.played above
     }
 
     // Referral: who referred this player?
