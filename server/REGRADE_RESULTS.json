@@ -1,0 +1,21 @@
+{
+  "results": [
+    {
+      "attemptId": "1a6c6a19-a242-4831-a257-280a7f9d5cf6",
+      "playerId": "87b31941-32d5-450c-9c87-79d8855e533c",
+      "pack": "Roxy",
+      "oldScore": 0,
+      "newScore": 0,
+      "affected": false,
+      "reason": "Score unchanged"
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "affected": 0,
+    "credits": 0,
+    "refunds": 0,
+    "totalCredits": 0,
+    "totalRefunds": 0
+  }
+}
