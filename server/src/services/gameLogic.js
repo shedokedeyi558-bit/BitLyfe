@@ -36,10 +36,26 @@ function checkAnswer(question, playerAnswer) {
   if (!playerAnswer || typeof playerAnswer !== 'string') return false;
 
   if (format === 'multiple_choice') {
-    // For MC, compare option keys/values case-insensitively
     const normalizedPlayer = playerAnswer.trim().toLowerCase();
     const normalizedCorrect = correct_answer.trim().toLowerCase();
-    return normalizedPlayer === normalizedCorrect;
+
+    // Direct match: both are keys (e.g., "b" vs "b")
+    if (normalizedPlayer === normalizedCorrect) return true;
+
+    // Fallback: player may have submitted option text instead of key
+    // (e.g., frontend sent "Mars" instead of "B")
+    if (options && Array.isArray(options)) {
+      const optionIndex = options.findIndex((opt) =>
+        opt && opt.toString().trim().toLowerCase() === normalizedPlayer
+      );
+      if (optionIndex >= 0) {
+        // Convert index to letter key and compare
+        const expectedLetter = String.fromCharCode(65 + optionIndex).toLowerCase();
+        return expectedLetter === normalizedCorrect;
+      }
+    }
+
+    return false;
   }
 
   if (format === 'type_answer') {
