@@ -733,11 +733,12 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
           // Re-fetch final counts for the completed attempt
           const { data: doneAttempt } = await supabase
             .from('special_attempts')
-            .select('status, correct_count')
+            .select('status, correct_count, answers')
             .eq('id', sessionId)
             .single();
           const passed = doneAttempt?.status === 'passed';
           const prize = passed ? parseFloat(retryPack?.prize || 0) : 0;
+          const finalAnswers = doneAttempt?.answers || [];
 
           // (d) Per-question stats — fire-and-forget, may have been skipped on crash
           Promise.resolve(supabase.rpc('increment_pill_stats', {
@@ -775,6 +776,24 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
             }
           }
 
+          // Build per-question breakdown for review
+          const retryAllPills = await getPillsByIds(questionIds);
+          const retryQuestionsBreakdown = questionIds.map((qId, i) => {
+            const pill = retryAllPills[i];
+            const playerAnswer = finalAnswers[i];
+            const isCorrectAnswer = playerAnswer !== null && playerAnswer !== undefined && checkAnswer(pill, String(playerAnswer));
+            
+            return {
+              question_number: i + 1,
+              question_text: pill?.question || '',
+              format: pill?.format || 'mcq',
+              options: pill?.format === 'mcq' ? (pill?.options || []) : null,
+              player_answer: playerAnswer !== null && playerAnswer !== undefined ? String(playerAnswer) : null,
+              correct_answer: pill?.correct_answer || '',
+              is_correct: isCorrectAnswer,
+            };
+          });
+
           return res.json({
             success: true,
             idempotent_replay: true,
@@ -792,6 +811,7 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
               question_number: idx + 1,
               total_questions: questionIds.length,
               required_correct: requiredCorrectRetry,
+              questions_breakdown: retryQuestionsBreakdown,
             },
           });
         }
@@ -906,6 +926,24 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
         ).catch(() => {});
       }
 
+      // Build per-question breakdown for review
+      const allPills = await getPillsByIds(questionIds);
+      const questionsBreakdown = questionIds.map((qId, i) => {
+        const pill = allPills[i];
+        const playerAnswer = currentAnswers[i];
+        const isCorrectAnswer = playerAnswer !== null && playerAnswer !== undefined && checkAnswer(pill, String(playerAnswer));
+        
+        return {
+          question_number: i + 1,
+          question_text: pill?.question || '',
+          format: pill?.format || 'mcq',
+          options: pill?.format === 'mcq' ? (pill?.options || []) : null,
+          player_answer: playerAnswer !== null && playerAnswer !== undefined ? String(playerAnswer) : null,
+          correct_answer: pill?.correct_answer || '',
+          is_correct: isCorrectAnswer,
+        };
+      });
+
       return res.json({
         success: true,
         data: {
@@ -923,6 +961,7 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
           total_questions: questionIds.length,
           required_correct: requiredCorrect,
           timed_out: timedOut && !isLastQuestion,
+          questions_breakdown: questionsBreakdown,
         },
       });
     }
