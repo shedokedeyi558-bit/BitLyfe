@@ -748,8 +748,8 @@ router.put('/players/:id/ban', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to ban player' });
 
-    // Audit log
-    await supabase.from('admin_audit_log').insert({
+    // Audit log — fire-and-forget, never block the response
+    Promise.resolve(supabase.from('admin_audit_log').insert({
       admin_id: admin.id,
       admin_email: admin.email || 'unknown',
       action: 'ban',
@@ -758,7 +758,7 @@ router.put('/players/:id/ban', async (req, res) => {
       player_id: id,
       notes: String(reason).trim(),
       payload: { previous_status: player.status, phone: player.phone },
-    }).catch(() => {});
+    })).catch(() => {});
 
     return res.json({ success: true, data: { player: data, message: 'Player banned' } });
   } catch (err) {
@@ -794,8 +794,8 @@ router.put('/players/:id/unban', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to unban player' });
 
-    // Audit log
-    await supabase.from('admin_audit_log').insert({
+    // Audit log — fire-and-forget
+    Promise.resolve(supabase.from('admin_audit_log').insert({
       admin_id: admin.id,
       admin_email: admin.email || 'unknown',
       action: 'unban',
@@ -804,7 +804,7 @@ router.put('/players/:id/unban', async (req, res) => {
       player_id: id,
       notes: reason ? String(reason).trim() : 'Unbanned by admin',
       payload: { previous_status: 'banned', phone: player.phone },
-    }).catch(() => {});
+    })).catch(() => {});
 
     return res.json({ success: true, data: { player: data, message: 'Player unbanned' } });
   } catch (err) {
