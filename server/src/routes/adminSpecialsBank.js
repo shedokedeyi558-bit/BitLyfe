@@ -491,6 +491,90 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/specials-bank/packs/:packId/import-from-library
+ * Import selected draft library questions into a pack's bank as independent rows.
+ * Library originals are never modified or consumed — can be reused for other packs.
+ *
+ * Body: { question_ids: ["uuid1", "uuid2", ...] }
+ *
+ * Response: { success, data: { imported: N, pack_id, questions: [...] } }
+ */
+router.post('/packs/:packId/import-from-library', async (req, res) => {
+  try {
+    const { packId } = req.params;
+    const { question_ids } = req.body;
+
+    if (!Array.isArray(question_ids) || question_ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'question_ids must be a non-empty array' });
+    }
+
+    // Confirm target is a Specials pack
+    const targetPack = await requireSpecialsPack(packId).catch((err) => {
+      res.status(err.status || 500).json({ success: false, error: err.message });
+      return null;
+    });
+    if (!targetPack) return;
+
+    // Fetch the requested draft library questions (non-deleted only)
+    // Use parallel .eq() queries — .in('id', uuidArray) silently returns empty for UUID PKs
+    const draftResults = await Promise.all(
+      question_ids.map((qid) =>
+        supabase
+          .from('draft_question_library')
+          .select('question, format, options, correct_answer, case_sensitive, color')
+          .eq('id', qid)
+          .is('deleted_at', null)
+          .maybeSingle()
+          .then(({ data }) => data)
+      )
+    );
+    const drafts = draftResults.filter(Boolean);
+
+    if (drafts.length === 0) {
+      return res.status(404).json({ success: false, error: 'No matching non-deleted library questions found' });
+    }
+
+    const resolvedFee   = targetPack.entry_fee !== null ? Number(targetPack.entry_fee)  : 0;
+    const resolvedPrize = targetPack.prize      !== null ? Number(targetPack.prize)      : 0;
+
+    // When copying from library to pack: do NOT copy timer_seconds
+    // Pack uses pack-level quiz_expires_at for time limits, not per-question timers
+    const toInsert = drafts.map((q) => ({
+      admin_id:       req.admin?.id || null,
+      pack_id:        packId,
+      question:       q.question,
+      format:         q.format,
+      options:        q.options,
+      correct_answer: q.correct_answer,
+      case_sensitive: q.case_sensitive,
+      color:          q.color,
+      entry_fee:      resolvedFee,
+      prize:          resolvedPrize,
+      status:         'available',
+      times_answered: 0,
+      times_correct:  0,
+    }));
+
+    const { data, error } = await supabase.from('pills').insert(toInsert).select();
+    if (error) return res.status(500).json({ success: false, error: 'Import failed: ' + error.message });
+
+    console.log(`[import-from-library] Imported ${data.length} questions into pack ${packId}`);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        imported: data.length,
+        pack_id: packId,
+        questions: data,
+      },
+    });
+  } catch (err) {
+    console.error('Import from library error:', err);
+    return res.status(500).json({ success: false, error: 'Import failed' });
+  }
+});
+
 // ─── DRAFT QUESTION LIBRARY: CRUD ────────────────────────────────────────────
 
 /**
