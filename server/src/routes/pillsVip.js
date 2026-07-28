@@ -573,6 +573,12 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to start VIP attempt' });
     }
 
+    // Increment current_entries on the pack — fire-and-forget, never blocks response.
+    // This is what powers entries_made / entry_cap_reached on the admin pack list.
+    Promise.resolve(
+      supabase.rpc('increment_pack_entries', { p_id: packId })
+    ).catch((err) => console.error('increment_pack_entries failed:', err));
+
     const pills = await getPillsByIds(selectedIds);
 
     return res.status(201).json({
