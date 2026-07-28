@@ -109,6 +109,7 @@ router.get('/packs', async (req, res) => {
         // ── Entry cap fields (Specials-only) ───────────────────────────────
         max_entries: isSpecial ? (pack.max_entries || null) : null,
         current_entries: isSpecial ? (pack.current_entries || 0) : null,
+        entries_made: isSpecial ? (pack.current_entries || 0) : null,  // alias — same value, matches player endpoint naming
         entries_remaining: isSpecial && pack.max_entries
           ? Math.max(0, pack.max_entries - (pack.current_entries || 0))
           : null,
