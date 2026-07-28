@@ -79,6 +79,11 @@ const gameLimiter = rateLimit({
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
+// Health check — no auth, always 200. Used by UptimeRobot to keep Render alive.
+app.get('/api/health', (_req, res) => {
+  res.status(200).json({ success: true, status: 'ok', timestamp: new Date().toISOString() });
+});
+
 app.get('/health', (_req, res) => {
   res.json({ 
     success: true, 
