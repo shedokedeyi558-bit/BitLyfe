@@ -43,7 +43,6 @@ async function sendSmsOtp(phone, otp) {
       return { success: false, error: data.message || 'SMS failed' };
     }
 
-    console.log(`[OTP] Sent to ${phone} — Termii message_id: ${data.message_id || 'ok'}`);
     return { success: true };
   } catch (err) {
     console.error('[OTP] Termii fetch error:', err.message);
@@ -873,7 +872,6 @@ router.post('/forgot-password', async (req, res) => {
     if (player) {
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
       resetOtpStore.set(normalizedPhone, { otp, expires: Date.now() + 10 * 60 * 1000 });
-      console.log(`[RESET OTP] ${normalizedPhone} → ${otp}`);
       await sendSmsOtp(normalizedPhone, otp);
     }
 

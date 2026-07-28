@@ -767,7 +767,6 @@ router.post('/answer/:sessionId', auth, async (req, res) => {
               .maybeSingle();
 
             if (!existingTxn) {
-              console.log(`[vip-replay] applying missed pass credit player=${player.id} prize=${prize}`);
               try {
                 currentBalance = await creditSpecialsPrize(player.id, prize, retryPack?.name || attempt.pack_id);
               } catch (creditErr) {

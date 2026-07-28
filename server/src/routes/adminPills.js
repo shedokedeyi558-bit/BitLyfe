@@ -41,7 +41,6 @@ router.get('/packs', async (req, res) => {
 
     // admin_get_pill_packs returns JSON array (json_agg result).
     // Supabase RPC wraps it: data = the JSON value directly (array or null).
-    console.log('GET /packs RPC raw type:', typeof packsRaw, Array.isArray(packsRaw) ? `array[${packsRaw.length}]` : packsRaw === null ? 'null' : 'object');
     const packs = Array.isArray(packsRaw) ? packsRaw : (packsRaw ? [packsRaw] : []);
 
     const packIds = packs.map((p) => p.id);
@@ -161,8 +160,6 @@ router.post('/packs', async (req, res) => {
       pack_type, question_count, required_correct, entry_window_end,
       quiz_expires_at, target_bank_size, max_entries,
     } = req.body;
-
-    console.log('POST /packs request body:', { name, category, status, entry_fee, prize, is_vip, pack_type, question_count, required_correct, entry_window_end, quiz_expires_at, target_bank_size, max_entries, total_time_seconds: req.body.total_time_seconds, total_time_minutes: req.body.total_time_minutes });
 
     // Accept either total_time_seconds (raw seconds) or total_time_minutes (converted to seconds).
     // Frontend may send either — both are normalised to seconds here.

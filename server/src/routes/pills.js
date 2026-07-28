@@ -613,19 +613,6 @@ router.post('/submit', auth, async (req, res) => {
     const { pillId, answer } = req.body;
     const player = req.player;
 
-    // ── DIAGNOSTIC LOGGING ────────────────────────────────────────────────
-    console.log('[submit] pillId:', pillId, 'playerId:', player.id);
-
-    // Log exact pill_plays row state at the moment submit fires
-    const { data: diagRow, error: diagErr } = await supabase
-      .from('pill_plays')
-      .select('id, pill_id, player_id, locked_at, submitted_answer, created_at')
-      .eq('pill_id', pillId)
-      .eq('player_id', player.id)
-      .maybeSingle();
-    console.log('[submit] pill_plays row:', JSON.stringify(diagRow), 'error:', diagErr?.message);
-    console.log('[submit] answer received:', answer);
-
     if (!pillId || answer === undefined || answer === null) {
       return res.status(400).json({ success: false, error: 'pillId and answer are required' });
     }
@@ -660,15 +647,12 @@ router.post('/submit', auth, async (req, res) => {
       if (attempt < 2) await new Promise((r) => setTimeout(r, 200));
     }
 
-    console.log(`[SUBMIT] pill_plays (after retry): found=${!!play} playErr=${playErr?.message}`);
-
     if (playErr) {
       console.error('pill_plays DB error:', playErr.message, playErr.code);
       return res.status(500).json({ success: false, error: 'Failed to verify pill play record' });
     }
 
     if (!play) {
-      console.error('[SUBMIT] no pill_plays row found after 3 retries — open() may have failed silently');
       return res.status(409).json({ success: false, error: 'You must open this pill first' });
     }
 
@@ -746,7 +730,6 @@ router.post('/submit', auth, async (req, res) => {
 
         if (correct && freshPlay && !freshPlay.won) {
           // (b/c/e/f) Win was not recorded — apply credit, mark won, record transaction, notify
-          console.log(`[submit] idempotent: applying missed win credit player=${player.id} prize=${prize}`);
           const { data: freshPlayer } = await supabase.from('players').select('balance').eq('id', player.id).single();
           const newBalance = (freshPlayer?.balance || 0) + prize;
           await supabase.from('players').update({ balance: newBalance }).eq('id', player.id);

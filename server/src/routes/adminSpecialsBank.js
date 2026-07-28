@@ -302,14 +302,6 @@ async function requireSpecialsPack(packId) {
  */
 router.post('/packs/:packId/import', upload.single('file'), async (req, res) => {
   try {
-    console.log('[packs/:packId/import] Called with:', {
-      packId: req.params.packId,
-      has_file: !!req.file,
-      body_questions_type: Array.isArray(req.body.questions) ? 'array' : typeof req.body.questions,
-      body_questions_length: Array.isArray(req.body.questions) ? req.body.questions.length : 'N/A',
-      body_keys: Object.keys(req.body),
-    });
-
     const pack = await requireSpecialsPack(req.params.packId).catch((err) =>
       res.status(err.status || 500).json({ success: false, error: err.message })
     );
@@ -469,8 +461,6 @@ router.post('/packs/:packId/clone-from/:sourcePackId', async (req, res) => {
     const { data, error } = await supabase.from('pills').insert(toInsert).select();
     if (error) return res.status(500).json({ success: false, error: 'Clone failed: ' + error.message });
 
-    console.log(`[clone-from-pack] Cloned ${data.length}, skipped ${skipped.length} duplicates`);
-
     return res.status(201).json({
       success: true,
       data: {
@@ -558,8 +548,6 @@ router.post('/packs/:packId/import-from-library', async (req, res) => {
 
     const { data, error } = await supabase.from('pills').insert(toInsert).select();
     if (error) return res.status(500).json({ success: false, error: 'Import failed: ' + error.message });
-
-    console.log(`[import-from-library] Imported ${data.length} questions into pack ${packId}`);
 
     return res.status(201).json({
       success: true,
@@ -763,13 +751,6 @@ router.delete('/library/:id', async (req, res) => {
  */
 router.post('/library/import', upload.single('file'), async (req, res) => {
   try {
-    console.log('[library/import] Called with:', {
-      has_file: !!req.file,
-      body_questions_type: Array.isArray(req.body.questions) ? 'array' : typeof req.body.questions,
-      body_questions_length: Array.isArray(req.body.questions) ? req.body.questions.length : 'N/A',
-      body_keys: Object.keys(req.body),
-    });
-
     const rawRows = parseInput(req.file, req.body.questions);
     if (!rawRows.length) {
       return res.status(400).json({ success: false, error: 'No questions provided' });
@@ -822,11 +803,6 @@ router.post('/library/import', upload.single('file'), async (req, res) => {
 router.post('/library/importFromLibrary', async (req, res) => {
   try {
     const { question_ids, pack_id } = req.body;
-
-    console.log('[library/importFromLibrary] Import with duplicate detection:', {
-      question_ids_count: Array.isArray(question_ids) ? question_ids.length : 0,
-      pack_id,
-    });
 
     if (!pack_id) {
       return res.status(400).json({ success: false, error: 'pack_id is required' });
@@ -925,8 +901,6 @@ router.post('/library/importFromLibrary', async (req, res) => {
     const { data, error } = await supabase.from('pills').insert(toInsert).select();
     if (error) return res.status(500).json({ success: false, error: 'Copy failed: ' + error.message });
 
-    console.log(`[library/importFromLibrary] Imported ${data.length}, skipped ${skipped.length} duplicates`);
-
     return res.status(201).json({
       success: true,
       data: {
@@ -962,14 +936,6 @@ router.post('/library/importFromLibrary', async (req, res) => {
 router.post('/library/copy-to-pack', async (req, res) => {
   try {
     const { question_ids, pack_id } = req.body;
-
-    // Log for diagnostics
-    console.log('[copy-to-pack] Request received:', {
-      question_ids_type: Array.isArray(question_ids) ? 'array' : typeof question_ids,
-      question_ids_length: Array.isArray(question_ids) ? question_ids.length : 'N/A',
-      pack_id_type: typeof pack_id,
-      body_keys: Object.keys(req.body),
-    });
 
     if (!pack_id) {
       return res.status(400).json({ success: false, error: 'pack_id is required' });
