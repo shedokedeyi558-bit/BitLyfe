@@ -379,10 +379,15 @@ router.get('/transactions', auth, async (req, res) => {
     const { page = 1, limit = 20 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
+    // Exclude deposit_pending rows — these are internal tracking records for
+    // in-flight payments. They are not completed transactions. If a user starts
+    // a deposit and abandons it, it should not appear in their history at all.
+    // When a deposit completes, the deposit_pending row is replaced by a 'deposit' row.
     const { data, error, count } = await supabase
       .from('transactions')
       .select('id, type, amount, description, reference, created_at', { count: 'exact' })
       .eq('player_id', req.player.id)
+      .neq('type', 'deposit_pending')
       .order('created_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1);
 
