@@ -25,7 +25,7 @@ async function initializeTransaction({ email, amountKobo, reference, metadata = 
       amount: amountKobo,
       reference,
       metadata,
-      callback_url: `https://bitlyf.vercel.app/payment/verify`,
+      callback_url: `${(process.env.FRONTEND_URL || 'https://bitlyf.vercel.app').replace(/\/$/, '')}/payment/verify`,
     },
     { headers: getHeaders() }
   );
