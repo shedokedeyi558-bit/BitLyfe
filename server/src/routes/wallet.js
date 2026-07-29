@@ -2,7 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
-const paystack = require('../services/paystack');
+const squad = require('../services/squad');
 const { checkReferralCompletion } = require('./referrals');
 
 const router = express.Router();
@@ -198,7 +198,7 @@ router.put('/limits', auth, async (req, res) => {
 
 /**
  * POST /api/wallet/deposit
- * Initialize a Paystack transaction and return authorization_url.
+ * Initialize a Squad transaction and return authorization_url.
  * Body: { amount } — amount in Naira
  */
 router.post('/deposit', auth, async (req, res) => {
@@ -214,10 +214,10 @@ router.post('/deposit', auth, async (req, res) => {
     const amountKobo = amountNaira * 100;
     const reference = `dep_${uuidv4()}`;
 
-    // Use phone as a pseudo-email for Paystack (fallback format)
-    const email = player.email || `${player.phone}@bitlyfe.app`;
+    // Squad requires a valid email. Generate synthetic email if player has none.
+    const email = player.email || `player_${player.id.substring(0, 8)}@bitlyfe.app`;
 
-    const paystackRes = await paystack.initializeTransaction({
+    const paystackRes = await squad.initializeTransaction({
       email,
       amountKobo,
       reference,
@@ -225,6 +225,7 @@ router.post('/deposit', auth, async (req, res) => {
     });
 
     if (!paystackRes.status) {
+      console.error('Squad initialization failed:', JSON.stringify(paystackRes, null, 2));
       return res.status(502).json({ success: false, error: 'Payment initialization failed' });
     }
 
@@ -246,8 +247,24 @@ router.post('/deposit', auth, async (req, res) => {
       },
     });
   } catch (err) {
-    console.error('Deposit error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to initialize deposit' });
+    // Log full Squad API error details for debugging
+    console.error('Deposit error:', err.message);
+    if (err.response) {
+      console.error('Squad API error response:', JSON.stringify({
+        status: err.response.status,
+        statusText: err.response.statusText,
+        data: err.response.data,
+        headers: err.response.headers,
+      }, null, 2));
+    }
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Failed to initialize deposit',
+      // Include Squad error message in development for easier debugging
+      ...(process.env.NODE_ENV !== 'production' && err.response?.data ? { 
+        debug: err.response.data 
+      } : {})
+    });
   }
 });
 
@@ -286,7 +303,7 @@ router.get('/verify', auth, async (req, res) => {
     }
 
     // Verify with Paystack
-    const paystackRes = await paystack.verifyTransaction(reference);
+    const paystackRes = await squad.verifyTransaction(reference);
 
     if (!paystackRes.status || paystackRes.data.status !== 'success') {
       return res.status(400).json({
@@ -435,9 +452,9 @@ router.get('/banks', auth, async (req, res) => {
   try {
     const now = Date.now();
     if (!banksCache || now > banksCacheExpiry) {
-      const paystackRes = await paystack.getBankList();
+      const paystackRes = await squad.getBankList();
       if (!paystackRes.status) {
-        return res.status(502).json({ success: false, error: 'Failed to fetch bank list from Paystack' });
+        return res.status(502).json({ success: false, error: 'Failed to fetch bank list from payment provider' });
       }
       banksCache = paystackRes.data.map((b) => ({
         name: b.name,
@@ -467,7 +484,7 @@ router.get('/resolve-account', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'account_number and bank_code are required' });
     }
 
-    const paystackRes = await paystack.resolveAccountNumber(account_number, bank_code);
+    const paystackRes = await squad.resolveAccountNumber(account_number, bank_code);
 
     if (!paystackRes.status) {
       return res.status(400).json({ success: false, error: 'Could not resolve account. Check the account number and bank.' });

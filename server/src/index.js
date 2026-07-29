@@ -172,18 +172,33 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/challenges', challengeRoutes);
 app.use('/api/player/referrals', referralsRouter);
 
-// ─── Paystack Webhook ─────────────────────────────────────────────────────────
+// ─── SquadCo Webhook ─────────────────────────────────────────────────────────
 
 /**
- * POST /api/paystack/webhook
- * Handles Paystack event callbacks (charge.success, transfer.success, etc.)
+ * POST /api/squad/webhook
+ * Handles Squad event callbacks (charge_successful, etc.)
+ *
+ * Signature verification: HMAC-SHA512 of JSON.stringify(req.body) with
+ * SQUADCO_SECRET_KEY, uppercased. Header: x-squad-encrypted-body.
+ *
+ * NOTE: Uses express.json() (parsed body), NOT express.raw().
+ * The HMAC is computed over JSON.stringify(req.body) after parsing.
  */
-app.post('/api/paystack/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+app.post('/api/squad/webhook', express.json(), async (req, res) => {
   try {
-    const secret = process.env.PAYSTACK_SECRET_KEY;
-    const hash = crypto.createHmac('sha512', secret).update(req.body).digest('hex');
+    const secret = process.env.SQUADCO_SECRET_KEY;
 
-    if (hash !== req.headers['x-paystack-signature']) {
+    if (!secret) {
+      console.error('[squad webhook] SQUADCO_SECRET_KEY env var is not set — rejecting webhook');
+      return res.status(500).send('Webhook secret not configured');
+    }
+    const hash = crypto
+      .createHmac('sha512', secret)
+      .update(JSON.stringify(req.body))
+      .digest('hex')
+      .toUpperCase();
+
+    if (hash !== req.headers['x-squad-encrypted-body']) {
       await supabase.from('webhook_logs').insert({
         event_type: 'invalid_signature',
         payload: {},
@@ -192,31 +207,42 @@ app.post('/api/paystack/webhook', express.raw({ type: 'application/json' }), asy
       return res.status(401).send('Invalid signature');
     }
 
-    const event = JSON.parse(req.body);
+    const event = req.body; // already parsed
 
-    // Log webhook event
     await supabase.from('webhook_logs').insert({
-      event_type: event.event,
+      event_type: event.Event,
       payload: event,
       status: 'received',
     });
 
-    if (event.event === 'charge.success') {
-      const { reference, amount, metadata } = event.data;
+    // Squad deposit event: "charge_successful" (Paystack was "charge.success")
+    if (event.Event === 'charge_successful') {
+      const { transaction_ref, amount, transaction_status } = event.data;
+
+      // Only process confirmed successes
+      if (transaction_status !== 'Success') return res.sendStatus(200);
+
       const amountNaira = Math.floor(amount / 100);
-      const playerId = metadata?.playerId;
 
-      if (!playerId) {
-        return res.sendStatus(200);
-      }
+      // Squad webhooks don't carry metadata the way Paystack did.
+      // Look up the pending transaction by reference to retrieve player_id.
+      const { data: pendingTxn } = await supabase
+        .from('transactions')
+        .select('player_id')
+        .eq('reference', transaction_ref)
+        .eq('type', 'deposit_pending')
+        .maybeSingle();
 
-      // Idempotency: check if already processed
+      const playerId = pendingTxn?.player_id;
+      if (!playerId) return res.sendStatus(200);
+
+      // Idempotency: skip if already processed
       const { data: existing } = await supabase
         .from('transactions')
         .select('id')
-        .eq('reference', reference)
+        .eq('reference', transaction_ref)
         .eq('type', 'deposit')
-        .single();
+        .maybeSingle();
 
       if (existing) return res.sendStatus(200);
 
@@ -238,80 +264,30 @@ app.post('/api/paystack/webhook', express.raw({ type: 'application/json' }), asy
           type: 'deposit',
           amount: amountNaira,
           description: `Deposit of ₦${amountNaira} (webhook)`,
-          reference,
+          reference: transaction_ref,
         });
 
-        // Update webhook log status
-        await supabase.from('webhook_logs').update({ status: 'processed' }).eq('event_type', event.event).eq('payload->data->>reference', reference);
-      }
-    }
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error('Webhook error:', err);
-    return res.sendStatus(500);
-  }
-});
-
-// Legacy webhook endpoint (keep for backward compatibility)
-app.post('/api/webhooks/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
-  try {
-    const crypto = require('crypto');
-    const secret = process.env.PAYSTACK_SECRET_KEY;
-    const hash = crypto.createHmac('sha512', secret).update(req.body).digest('hex');
-
-    if (hash !== req.headers['x-paystack-signature']) {
-      return res.status(401).send('Invalid signature');
-    }
-
-    const event = JSON.parse(req.body);
-    const supabase = require('./db/supabase');
-
-    if (event.event === 'charge.success') {
-      const { reference, amount, metadata } = event.data;
-      const amountNaira = Math.floor(amount / 100);
-      const playerId = metadata?.playerId;
-
-      if (!playerId) {
-        return res.sendStatus(200);
-      }
-
-      // Idempotency: check if already processed
-      const { data: existing } = await supabase
-        .from('transactions')
-        .select('id')
-        .eq('reference', reference)
-        .eq('type', 'deposit')
-        .single();
-
-      if (existing) return res.sendStatus(200);
-
-      // Credit wallet
-      const { data: player } = await supabase
-        .from('players')
-        .select('balance')
-        .eq('id', playerId)
-        .single();
-
-      if (player) {
+        // Remove pending record so history shows only the settled deposit
         await supabase
-          .from('players')
-          .update({ balance: (player.balance || 0) + amountNaira })
-          .eq('id', playerId);
+          .from('transactions')
+          .delete()
+          .eq('reference', transaction_ref)
+          .eq('type', 'deposit_pending');
 
-        await supabase.from('transactions').insert({
-          player_id: playerId,
-          type: 'deposit',
-          amount: amountNaira,
-          description: `Deposit of ₦${amountNaira} (webhook)`,
-          reference,
-        });
+        // Trigger referral first-deposit check (fire-and-forget)
+        const { checkReferralCompletion } = require('./routes/referrals');
+        checkReferralCompletion(playerId, 'deposit', amountNaira).catch(() => {});
+
+        await supabase
+          .from('webhook_logs')
+          .update({ status: 'processed' })
+          .eq('event_type', event.Event);
       }
     }
 
     return res.sendStatus(200);
   } catch (err) {
-    console.error('Webhook error:', err);
+    console.error('Squad webhook error:', err);
     return res.sendStatus(500);
   }
 });

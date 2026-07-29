@@ -3,7 +3,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const supabase = require('../db/supabase');
 const adminAuth = require('../middleware/adminAuth');
-const paystack = require('../services/paystack');
+const squad = require('../services/squad');
 
 const router = express.Router();
 
@@ -19,12 +19,12 @@ router.use(adminAuth);
  * Returns { success, paystackTransferCode, errorMessage }
  * Does NOT mutate the withdrawal_requests row — callers handle status updates.
  */
-async function attemptPaystackTransfer(withdrawal) {
+async function attemptSquadTransfer(withdrawal) {
   let recipientCode = withdrawal.recipient_code || null;
 
-  // Create recipient if not yet stored
+  // Build recipient code from stored bank details if not already present
   if (!recipientCode) {
-    const recipientRes = await paystack.createTransferRecipient({
+    const recipientRes = await squad.createTransferRecipient({
       name: withdrawal.bank_name || withdrawal.phone,
       accountNumber: withdrawal.account_number,
       bankCode: withdrawal.bank_code,
@@ -39,14 +39,14 @@ async function attemptPaystackTransfer(withdrawal) {
 
     recipientCode = recipientRes.data.recipient_code;
 
-    // Persist recipient_code so retries re-use it (no duplicate recipients)
+    // Persist recipient_code so retries re-use it
     await supabase
       .from('withdrawal_requests')
       .update({ recipient_code: recipientCode })
       .eq('id', withdrawal.id);
   }
 
-  const transferRes = await paystack.initiateTransfer({
+  const transferRes = await squad.initiateTransfer({
     amountKobo: withdrawal.amount * 100,
     recipientCode,
     reference: withdrawal.transfer_reference,
@@ -271,7 +271,7 @@ router.put('/:id/approve', async (req, res) => {
     // ── Step 4: attempt Paystack transfer ────────────────────────────────────
     let paystackResult;
     try {
-      paystackResult = await attemptPaystackTransfer(withdrawal);
+      paystackResult = await attemptSquadTransfer(withdrawal);
     } catch (unexpectedErr) {
       console.error('Unexpected Paystack error during approve:', unexpectedErr.message);
       await supabase
@@ -414,7 +414,7 @@ router.put('/:id/retry-transfer', async (req, res) => {
 
     let paystackResult;
     try {
-      paystackResult = await attemptPaystackTransfer(withdrawal);
+      paystackResult = await attemptSquadTransfer(withdrawal);
     } catch (unexpectedErr) {
       console.error('Unexpected Paystack error during retry:', unexpectedErr.message);
       await supabase

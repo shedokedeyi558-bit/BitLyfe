@@ -446,6 +446,16 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       });
     }
 
+    // Check if pill is already being opened by another player (status='opening')
+    // This prevents a race condition where two players could both open the same pill
+    if (pill.status === 'opening') {
+      return res.status(409).json({
+        success: false,
+        code: 'PILL_BEING_OPENED',
+        error: 'This question is currently being played by another player. Please refresh to see available questions.',
+      });
+    }
+
     // Check if this player already has a pill_plays row for this pill
     const { data: existingPlay } = await supabase
       .from('pill_plays')
@@ -463,6 +473,7 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       // ── Resume path: player paid but never answered ──────────────────────
       // They left before submitting (app close, navigation, etc.).
       // Return the question data again WITHOUT charging — balance is already held.
+      // Note: pill should still be in 'opening' state if not yet answered
       let resumePrize = parseFloat(pill.prize);
       if (pill.pack_id) {
         const { data: pack } = await supabase
@@ -534,6 +545,35 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
     }
 
+    // ── ATOMIC PILL CLAIM ────────────────────────────────────────────────────────
+    // Atomically transition pill status from 'available' → 'opening'
+    // This prevents another player from opening the same pill simultaneously.
+    // If the UPDATE fails (pill.status is not 'available'), refund and reject.
+    const { data: claimResult, error: claimErr } = await supabase
+      .rpc('claim_pill_for_opening', { p_pill_id: pillId });
+
+    if (claimErr) {
+      console.error('Atomic pill claim error:', claimErr.message);
+      return res.status(500).json({ success: false, error: 'Failed to claim pill' });
+    }
+
+    // claimResult[0].success will be false if pill.status was not 'available'
+    if (!claimResult || !claimResult[0]?.success) {
+      const currentStatus = claimResult?.[0]?.previous_status;
+      if (currentStatus === 'playing' || currentStatus === 'opening') {
+        return res.status(409).json({
+          success: false,
+          code: 'PILL_BEING_OPENED',
+          error: 'This question is currently being played by another player. Please refresh.',
+        });
+      }
+      return res.status(409).json({
+        success: false,
+        code: 'PILL_NO_LONGER_AVAILABLE',
+        error: 'This question is no longer available. Please refresh.',
+      });
+    }
+
     // Deduct entry fee — bonus first, real balance for remainder. Transaction recorded inside.
     let billing;
     try {
@@ -542,6 +582,8 @@ router.post('/open', idempotency(), auth, async (req, res) => {
         description: `Opened pill: ${pill.question.substring(0, 50)}`,
       });
     } catch (billingErr) {
+      // Billing failed — revert the pill claim to 'available'
+      await supabase.rpc('revert_pill_from_opening', { p_pill_id: pillId }).catch(() => {});
       if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
       throw billingErr;
     }
@@ -559,6 +601,8 @@ router.post('/open', idempotency(), auth, async (req, res) => {
       if (insertPlayErr.code !== '23505') {
         // Real insert failure — refund and abort
         try { await refundEntryFee(player.id, entryFee, pillId); } catch {}
+        // Also revert the pill claim
+        try { await supabase.rpc('revert_pill_from_opening', { p_pill_id: pillId }); } catch {}
         return res.status(500).json({ success: false, error: 'Failed to record pill open. Your payment has been refunded.' });
       }
     }
