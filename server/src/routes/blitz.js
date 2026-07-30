@@ -117,6 +117,10 @@ function calcPrizeDistribution(prizePool, platformCutPercent, totalRegistered) {
  * Score answers server-side against stored correct answers.
  * options_order (per-player shuffle map) is used to reverse-map
  * submitted answers back to canonical correct_answer values.
+ *
+ * For multiple_choice: exact match (case-insensitive) — options are fixed values.
+ * For type_answer: fuzzy match — handles articles ("a cat" = "cat"),
+ *   extra qualifiers ("lagos state" = "lagos"), and minor extra words.
  */
 function scoreAnswers(questions, submittedAnswers, optionsOrder) {
   const questionMap = {};
@@ -127,18 +131,69 @@ function scoreAnswers(questions, submittedAnswers, optionsOrder) {
     const question = questionMap[sub.question_id];
     if (!question) return { ...sub, is_correct: false };
 
-    const correctAnswer = String(question.correct_answer).trim().toLowerCase();
+    const correct = String(question.correct_answer).trim().toLowerCase();
+    const player = String(sub.answer).trim().toLowerCase();
 
-    // For multiple_choice with shuffle: the player submitted the display value
-    // from their shuffled options array, which IS the real answer text.
-    // So we just compare directly — shuffling reorders options, not their values.
-    const playerAnswer = String(sub.answer).trim().toLowerCase();
-    const is_correct = playerAnswer === correctAnswer;
+    let is_correct = false;
+
+    if (question.format === 'type_answer') {
+      is_correct = fuzzyMatch(player, correct);
+    } else {
+      // multiple_choice: exact match — options are predefined, no ambiguity
+      is_correct = player === correct;
+    }
+
     if (is_correct) score++;
     return { question_id: sub.question_id, answer: sub.answer, is_correct, time_taken_ms: sub.time_taken_ms || 0 };
   });
 
   return { scored, score };
+}
+
+/**
+ * Fuzzy match for type_answer questions.
+ *
+ * Rules (all case-insensitive, punctuation-stripped):
+ * 1. Exact match after normalisation — "Cat" = "cat" ✓
+ * 2. Player answer contains the correct answer as a whole word — "a cat" contains "cat" ✓
+ * 3. Correct answer contains the player answer as a whole word — "amazon river" contains "amazon" ✓
+ * 4. Player answer is the correct answer with common articles stripped — "the nile" = "nile" ✓
+ *
+ * Does NOT pass: "dog" when answer is "cat". "port harcourt" when answer is "lagos".
+ * Keeps it fair — only handles genuine grammatical variations, not wrong answers.
+ */
+function fuzzyMatch(playerRaw, correctRaw) {
+  // Normalise: lowercase, strip punctuation, collapse whitespace
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+
+  const player = norm(playerRaw);
+  const correct = norm(correctRaw);
+
+  // 1. Exact after normalisation
+  if (player === correct) return true;
+
+  // Strip leading articles from both before further checks
+  const stripArticles = (s) => s.replace(/^(a |an |the )/, '').trim();
+  const playerStripped = stripArticles(player);
+  const correctStripped = stripArticles(correct);
+
+  // 2. Exact after stripping articles — "a cat" = "cat", "the nile" = "nile"
+  if (playerStripped === correctStripped) return true;
+
+  // 3. Word-boundary containment — correct answer is a whole word within player answer
+  //    "lagos state" contains "lagos" → correct
+  //    "amazon river" as player when answer is "amazon" → correct
+  const wordBoundaryContains = (haystack, needle) => {
+    // escape regex special chars in needle
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(^|\\s)${escaped}(\\s|$)`);
+    return re.test(haystack);
+  };
+
+  if (wordBoundaryContains(playerStripped, correctStripped)) return true;
+  if (wordBoundaryContains(correctStripped, playerStripped)) return true;
+
+  return false;
 }
 
 /**
