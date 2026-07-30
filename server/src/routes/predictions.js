@@ -204,6 +204,7 @@ router.post('/enter', idempotency(), auth, async (req, res) => {
           participation_state: existing.answer !== null ? 'submitted_waiting' : 'entered_not_submitted',
           has_submitted: existing.answer !== null,
           newBalance: player.balance, // balance unchanged — already charged
+          newBonusBalance: player.bonus_balance || 0,
         },
       });
     }
