@@ -735,6 +735,50 @@ router.delete('/library/:id', async (req, res) => {
   }
 });
 
+/**
+ * DELETE /api/admin/specials-bank/library
+ * Bulk soft-delete ALL undeleted questions in the draft library.
+ * Does NOT touch questions that have been copied to packs (those are
+ * independent rows in the pills table with pack_id set).
+ * 
+ * Returns: { deleted: <count> }
+ */
+router.delete('/library', async (req, res) => {
+  try {
+    // Count how many undeleted library questions exist
+    const { count: totalCount, error: countErr } = await supabase
+      .from('draft_question_library')
+      .select('id', { count: 'exact', head: true })
+      .is('deleted_at', null);
+
+    if (countErr) {
+      return res.status(500).json({ success: false, error: 'Failed to query library' });
+    }
+
+    const countToDelete = totalCount || 0;
+
+    if (countToDelete === 0) {
+      return res.json({ success: true, data: { deleted: 0, message: 'Library is already empty' } });
+    }
+
+    // Soft-delete all undeleted rows (stamp deleted_at with current timestamp)
+    const now = new Date().toISOString();
+    const { error: deleteErr } = await supabase
+      .from('draft_question_library')
+      .update({ deleted_at: now })
+      .is('deleted_at', null);
+
+    if (deleteErr) {
+      return res.status(500).json({ success: false, error: 'Failed to delete library questions' });
+    }
+
+    return res.json({ success: true, data: { deleted: countToDelete } });
+  } catch (err) {
+    console.error('Library bulk delete error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete library' });
+  }
+});
+
 // ─── DRAFT LIBRARY: BULK IMPORT ──────────────────────────────────────────────
 
 /**
