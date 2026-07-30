@@ -217,7 +217,10 @@ app.post('/api/squad/webhook', express.json(), async (req, res) => {
 
     // Squad deposit event: "charge_successful" (Paystack was "charge.success")
     if (event.Event === 'charge_successful') {
-      const { transaction_ref, amount, transaction_status } = event.data;
+      // Squad webhook payload structure: fields at top level of event, or in event.Body
+      // The actual webhook data may be in event directly or nested in event.Body
+      const eventData = event.Body || event;
+      const { transaction_ref, amount, transaction_status } = eventData;
 
       // Only process confirmed successes
       if (transaction_status !== 'Success') return res.sendStatus(200);
