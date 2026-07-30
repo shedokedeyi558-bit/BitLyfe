@@ -145,7 +145,7 @@ router.get('/', auth, async (req, res) => {
   try {
     const { data: tournaments, error } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, prize_pool')
+      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes')
       .in('status', ['registration', 'active'])
       .order('tournament_start', { ascending: true });
 
@@ -644,21 +644,26 @@ router.get('/:id/results', auth, async (req, res) => {
       total_time_ms: a.total_time_ms,
     }));
 
-    // Player's own position
-    const { count: betterCount } = await supabase
-      .from('blitz_attempts')
-      .select('id', { count: 'exact', head: true })
-      .eq('tournament_id', id)
-      .eq('status', 'completed')
-      .neq('player_id', playerId);
-
-    // Player's own attempt and prize — may not exist
+    // Player's own attempt — fetch first so we can compute real position
     const { data: myAttempt } = await supabase
       .from('blitz_attempts')
       .select('score, total_time_ms')
       .eq('tournament_id', id)
       .eq('player_id', playerId)
       .maybeSingle();
+
+    // Compute real final position: count how many players beat this player
+    // (higher score, or same score + faster time)
+    let myPosition = null;
+    if (myAttempt) {
+      const { count: betterCount } = await supabase
+        .from('blitz_attempts')
+        .select('id', { count: 'exact', head: true })
+        .eq('tournament_id', id)
+        .eq('status', 'completed')
+        .or(`score.gt.${myAttempt.score},and(score.eq.${myAttempt.score},total_time_ms.lt.${myAttempt.total_time_ms})`);
+      myPosition = (betterCount || 0) + 1;
+    }
 
     const { data: myPrize } = await supabase
       .from('blitz_prizes')
@@ -673,6 +678,7 @@ router.get('/:id/results', auth, async (req, res) => {
         tournament: { id, title: tournament.title, prize_pool: tournament.prize_pool, total_registered: tournament.total_registered },
         leaderboard,
         player: {
+          position: myPosition,       // real final rank (works even outside top 20)
           attempt: myAttempt || null,
           prize: myPrize || null,
         },
