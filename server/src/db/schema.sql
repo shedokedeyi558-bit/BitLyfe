@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS blitz_tournaments (
   total_payout_percent DECIMAL(5,2) DEFAULT 40.00,
   ticket_tier_percent DECIMAL(5,2) DEFAULT 10.00,
   guaranteed_minimum INTEGER,
+  position_prizes JSONB DEFAULT NULL,  -- explicit per-position non-cash prizes
   created_by UUID,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -377,7 +378,7 @@ CREATE TABLE IF NOT EXISTS blitz_prizes (
   tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE CASCADE,
   player_id UUID REFERENCES players(id) ON DELETE CASCADE,
   position INTEGER NOT NULL,
-  prize_type TEXT CHECK (prize_type IN ('cash', 'free_ticket')) NOT NULL,
+  prize_type TEXT CHECK (prize_type IN ('cash', 'free_ticket', 'discount')) NOT NULL,
   amount INTEGER DEFAULT 0,
   ticket_code TEXT,
   distributed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -398,6 +399,7 @@ CREATE TABLE IF NOT EXISTS blitz_tickets (
   expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
   status TEXT CHECK (status IN ('unused', 'used', 'expired')) DEFAULT 'unused',
   used_on_tournament_id UUID REFERENCES blitz_tournaments(id) ON DELETE SET NULL,
+  discount_percent INTEGER DEFAULT NULL,  -- NULL = free entry; 1–99 = % off entry fee
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

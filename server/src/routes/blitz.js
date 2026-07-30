@@ -169,7 +169,7 @@ router.get('/:id', auth, async (req, res) => {
 
     const { data: tournament, error } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, prize_pool')
+      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, prize_pool, total_payout_percent, position_prizes')
       .eq('id', id)
       .single();
 
@@ -211,7 +211,8 @@ router.get('/:id', auth, async (req, res) => {
 
 /**
  * GET /api/blitz/:id/prize-estimate
- * Live prize pool estimate based on current/max registration
+ * Live prize pool estimate based on current/max registration.
+ * Also returns position_prizes so the frontend can show exactly what 2nd/3rd win.
  */
 router.get('/:id/prize-estimate', auth, async (req, res) => {
   try {
@@ -219,22 +220,22 @@ router.get('/:id/prize-estimate', auth, async (req, res) => {
 
     const { data: tournament } = await supabase
       .from('blitz_tournaments')
-      .select('id, entry_fee, max_participants, total_registered, cash_winner_count, total_payout_percent, ticket_tier_percent')
+      .select('id, entry_fee, max_participants, total_registered, cash_winner_count, total_payout_percent, ticket_tier_percent, position_prizes')
       .eq('id', id)
       .single();
 
     if (!tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
 
     const entryFee = Number(tournament.entry_fee || 0);
-    const maxParticipants = Number(tournament.max_participants || 100);
+    const maxParticipants = Number(tournament.max_participants || 20);
     const currentRegistered = Number(tournament.total_registered || 0);
     const cashWinnerCount = Number(tournament.cash_winner_count || 1);
-    const totalPayoutPercent = Number(tournament.total_payout_percent || 40);
-    const ticketTierPercent = Number(tournament.ticket_tier_percent || 10);
+    const totalPayoutPercent = Number(tournament.total_payout_percent || 80);
 
-    // Calculate prize pools
+    // Prize pool = total_payout_percent of total entry revenue (platform keeps the rest)
     const maxPrizePool = Math.floor(maxParticipants * entryFee * (totalPayoutPercent / 100));
     const currentEstimate = Math.floor(currentRegistered * entryFee * (totalPayoutPercent / 100));
+    const platformCutPercent = 100 - totalPayoutPercent;
 
     return res.json({
       success: true,
@@ -245,7 +246,9 @@ router.get('/:id/prize-estimate', auth, async (req, res) => {
         max_participants: maxParticipants,
         cash_winner_count: cashWinnerCount,
         total_payout_percent: totalPayoutPercent,
-        ticket_tier_percent: ticketTierPercent,
+        platform_cut_percent: platformCutPercent,
+        // Explicit per-position non-cash prizes (2nd, 3rd, etc.)
+        position_prizes: tournament.position_prizes || [],
       },
     });
   } catch (err) {
@@ -292,10 +295,10 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
     let usedTicketId = null;
 
     if (ticket_code) {
-      // Validate free ticket from blitz_tickets table
+      // Validate ticket from blitz_tickets table (free entry or discounted entry)
       const { data: ticket } = await supabase
         .from('blitz_tickets')
-        .select('id, expires_at, status, player_id')
+        .select('id, expires_at, status, player_id, discount_percent')
         .eq('ticket_code', ticket_code)
         .single();
 
@@ -303,29 +306,59 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
         return res.status(404).json({ success: false, code: 'TICKET_NOT_FOUND', error: 'Ticket not found' });
       }
 
-      // Check ticket ownership
       if (ticket.player_id !== player.id) {
         return res.status(403).json({ success: false, code: 'TICKET_NOT_OWNER', error: 'This ticket does not belong to you' });
       }
 
-      // Check expiration and update if needed (lazy-check)
       const now = new Date();
       if (new Date(ticket.expires_at) < now && ticket.status === 'unused') {
         await supabase.from('blitz_tickets').update({ status: 'expired' }).eq('id', ticket.id);
         return res.status(410).json({ success: false, code: 'TICKET_EXPIRED', error: 'Ticket has expired' });
       }
 
-      // Check if already used
       if (ticket.status === 'used') {
         return res.status(409).json({ success: false, code: 'TICKET_ALREADY_USED', error: 'Ticket has already been used' });
       }
 
-      // Check if expired
       if (ticket.status === 'expired') {
         return res.status(410).json({ success: false, code: 'TICKET_EXPIRED', error: 'Ticket has expired' });
       }
 
-      entryFeePaid = 0;
+      // discount_percent null/0 = free entry; otherwise deduct discounted amount
+      if (ticket.discount_percent && ticket.discount_percent > 0) {
+        // Discounted entry — player pays entry_fee * (discount_percent / 100) less
+        const discount = Math.floor(tournament.entry_fee * (ticket.discount_percent / 100));
+        entryFeePaid = tournament.entry_fee - discount;
+
+        if ((player.balance || 0) + (player.bonus_balance || 0) < entryFeePaid) {
+          return res.status(402).json({
+            success: false,
+            code: 'INSUFFICIENT_BALANCE',
+            error: `Insufficient balance. Discounted entry costs ₦${entryFeePaid} (${ticket.discount_percent}% off ₦${tournament.entry_fee})`,
+          });
+        }
+
+        const limitCheck = await checkSpendLimit(player.id, entryFeePaid);
+        if (!limitCheck.allowed) {
+          return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
+        }
+
+        let billing;
+        try {
+          billing = await deductEntryFee(player.id, entryFeePaid, {
+            type: 'blitz_entry',
+            description: `Blitz entry (${ticket.discount_percent}% discount): ${tournament.title}`,
+          });
+        } catch (billingErr) {
+          if (billingErr.insufficientFunds) return res.status(402).json({ success: false, error: billingErr.message });
+          throw billingErr;
+        }
+        req._blitzBilling = billing;
+      } else {
+        // Fully free entry
+        entryFeePaid = 0;
+      }
+
       usedTicketId = ticket.id;
     } else {
       // Deduct entry fee — bonus first, real balance for remainder

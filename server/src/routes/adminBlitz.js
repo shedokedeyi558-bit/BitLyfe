@@ -46,17 +46,25 @@ router.get('/', async (req, res) => {
 
 /**
  * POST /api/admin/blitz
- * Create a tournament with configurable payout distribution
+ * Create a tournament with configurable payout distribution.
+ *
  * Body: {
  *   title, description, entry_fee, question_count, time_limit_seconds,
  *   registration_start, tournament_start, tournament_end,
- *   max_participants (default 100),
- *   min_participants (default 1),
- *   cash_winner_count (default 1),
- *   payout_distribution (array, default [100], must sum to 100 and match cash_winner_count),
- *   total_payout_percent (default 40),
- *   ticket_tier_percent (default 10),
- *   guaranteed_minimum (optional, integer)
+ *   max_participants    (default 20)
+ *   min_participants    (default 1)
+ *   cash_winner_count   (default 1)
+ *   payout_distribution (array summing to 100, length === cash_winner_count, default [100])
+ *   total_payout_percent (default 80 — platform keeps 20%)
+ *   ticket_tier_percent  (default 0 — overridden by position_prizes)
+ *   guaranteed_minimum  (optional integer floor prize in naira)
+ *
+ *   position_prizes (optional JSONB array — explicit non-cash awards per rank):
+ *     [
+ *       { "position": 2, "prize_type": "free_ticket" },
+ *       { "position": 3, "prize_type": "discount", "discount_percent": 50 }
+ *     ]
+ *   When position_prizes is set, ticket_tier_percent is ignored for those positions.
  * }
  */
 router.post('/', async (req, res) => {
@@ -64,13 +72,14 @@ router.post('/', async (req, res) => {
     const {
       title, description, entry_fee, question_count, time_limit_seconds,
       registration_start, tournament_start, tournament_end,
-      max_participants = 100,
+      max_participants = 20,
       min_participants = 1,
       cash_winner_count = 1,
       payout_distribution = [100],
-      total_payout_percent = 40,
-      ticket_tier_percent = 10,
+      total_payout_percent = 80,
+      ticket_tier_percent = 0,
       guaranteed_minimum = null,
+      position_prizes = null,
     } = req.body;
 
     if (!title || entry_fee === undefined || !question_count || !time_limit_seconds ||
@@ -101,16 +110,34 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Validate percentages
     if (total_payout_percent < 1 || total_payout_percent > 100) {
       return res.status(400).json({ success: false, error: 'total_payout_percent must be between 1 and 100' });
     }
 
-    if (ticket_tier_percent < 0 || ticket_tier_percent > 100) {
-      return res.status(400).json({ success: false, error: 'ticket_tier_percent must be between 0 and 100' });
+    // Validate position_prizes if provided
+    if (position_prizes !== null) {
+      if (!Array.isArray(position_prizes)) {
+        return res.status(400).json({ success: false, error: 'position_prizes must be an array' });
+      }
+      for (const p of position_prizes) {
+        if (!p.position || !p.prize_type) {
+          return res.status(400).json({ success: false, error: 'Each position_prizes entry must have position and prize_type' });
+        }
+        if (!['free_ticket', 'discount'].includes(p.prize_type)) {
+          return res.status(400).json({ success: false, error: `Invalid prize_type "${p.prize_type}" — must be free_ticket or discount` });
+        }
+        if (p.prize_type === 'discount' && (p.discount_percent === undefined || p.discount_percent <= 0 || p.discount_percent >= 100)) {
+          return res.status(400).json({ success: false, error: 'discount prize_type requires discount_percent between 1 and 99' });
+        }
+        if (p.position <= cash_winner_count) {
+          return res.status(400).json({
+            success: false,
+            error: `position_prizes position ${p.position} overlaps with a cash winner rank (cash_winner_count is ${cash_winner_count})`,
+          });
+        }
+      }
     }
 
-    // Warn if leaving very little platform margin
     let warning = null;
     if (total_payout_percent > 90) {
       warning = 'This leaves less than 10% platform margin';
@@ -130,10 +157,11 @@ router.post('/', async (req, res) => {
         max_participants: Number(max_participants),
         min_participants: Number(min_participants),
         cash_winner_count: Number(cash_winner_count),
-        payout_distribution: payout_distribution,
+        payout_distribution,
         total_payout_percent: Number(total_payout_percent),
         ticket_tier_percent: Number(ticket_tier_percent),
         guaranteed_minimum: guaranteed_minimum ? Number(guaranteed_minimum) : null,
+        position_prizes: position_prizes || null,
         status: 'draft',
         total_registered: 0,
         prize_pool: 0,
@@ -145,9 +173,7 @@ router.post('/', async (req, res) => {
     if (error) return res.status(500).json({ success: false, error: 'Failed to create tournament: ' + error.message });
 
     const response = { success: true, data: { tournament: data } };
-    if (warning) {
-      response.warning = warning;
-    }
+    if (warning) response.warning = warning;
 
     return res.status(201).json(response);
   } catch (err) {
@@ -324,8 +350,18 @@ router.post('/:id/activate', async (req, res) => {
 
 /**
  * POST /api/admin/blitz/:id/score
- * Configurable prize distribution: uses payout_distribution, total_payout_percent, ticket_tier_percent
- * Rank by score DESC, then total_time_ms ASC
+ *
+ * Rank by score DESC, then total_time_ms ASC.
+ *
+ * Prize distribution:
+ *  - Cash prizes  → top cash_winner_count players, split per payout_distribution
+ *  - position_prizes (if set) → explicit per-position non-cash awards:
+ *      { position: 2, prize_type: "free_ticket" }
+ *      { position: 3, prize_type: "discount", discount_percent: 50 }
+ *  - ticket_tier_percent fallback → if position_prizes is null, award free
+ *    tickets to a percentage-based slice of remaining participants (legacy).
+ *
+ * Idempotent: already-awarded prizes are skipped, so re-running is safe.
  */
 router.post('/:id/score', async (req, res) => {
   try {
@@ -337,10 +373,10 @@ router.post('/:id/score', async (req, res) => {
       return res.status(400).json({ success: false, error: `Cannot score: status is ${tournament.status}` });
     }
 
-    // Set to scoring first
+    // Move to scoring state immediately (prevents double-scoring races)
     await supabase.from('blitz_tournaments').update({ status: 'scoring' }).eq('id', id);
 
-    // Get ranked leaderboard: score desc, time asc
+    // Ranked leaderboard: score desc, time asc
     const { data: attempts } = await supabase
       .from('blitz_attempts')
       .select('id, player_id, score, total_time_ms')
@@ -353,20 +389,15 @@ router.post('/:id/score', async (req, res) => {
       await supabase.from('blitz_tournaments').update({ status: 'completed' }).eq('id', id);
       return res.json({
         success: true,
-        data: {
-          message: 'No participants to score',
-          total_participants: 0,
-          total_cash_distributed: 0,
-          tickets_awarded: 0,
-        },
+        data: { message: 'No participants to score', total_participants: 0, total_cash_distributed: 0, non_cash_prizes_awarded: 0 },
       });
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // CALCULATE CASH PRIZES
+    // CASH PRIZES
     // ──────────────────────────────────────────────────────────────────────────
     const totalRevenue = tournament.total_registered * Number(tournament.entry_fee || 0);
-    const cashPool = totalRevenue * (Number(tournament.total_payout_percent || 40) / 100);
+    const cashPool = Math.floor(totalRevenue * (Number(tournament.total_payout_percent || 80) / 100));
     const payoutDistribution = tournament.payout_distribution || [100];
     const cashWinnerCount = Number(tournament.cash_winner_count || 1);
     const guaranteedMinimum = tournament.guaranteed_minimum ? Number(tournament.guaranteed_minimum) : null;
@@ -374,32 +405,25 @@ router.post('/:id/score', async (req, res) => {
     let totalCashPaid = 0;
     const prizeRecords = [];
 
-    // Award cash prizes to top cash_winner_count participants
     for (let i = 0; i < Math.min(cashWinnerCount, attempts.length); i++) {
       const attempt = attempts[i];
       const rank = i + 1;
 
-      // Check idempotency: skip if already awarded
+      // Idempotency check
       const { data: existing } = await supabase
         .from('blitz_prizes')
         .select('id')
         .eq('tournament_id', id)
         .eq('player_id', attempt.player_id)
         .eq('position', rank)
-        .single();
+        .maybeSingle();
 
       if (existing) continue;
 
-      // Calculate prize based on payout distribution
       const percentage = Number(payoutDistribution[i] || 0);
       let prize = Math.floor(cashPool * (percentage / 100));
+      if (guaranteedMinimum && prize < guaranteedMinimum) prize = guaranteedMinimum;
 
-      // Apply guaranteed minimum if set and prize is below it
-      if (guaranteedMinimum && prize < guaranteedMinimum) {
-        prize = guaranteedMinimum;
-      }
-
-      // Credit player
       const { data: player } = await supabase.from('players').select('balance').eq('id', attempt.player_id).single();
       await supabase
         .from('players')
@@ -410,7 +434,7 @@ router.post('/:id/score', async (req, res) => {
         player_id: attempt.player_id,
         type: 'blitz_prize',
         amount: prize,
-        description: `Blitz tournament prize - Position ${rank}: ${tournament.title}`,
+        description: `Blitz prize — Position ${rank}: ${tournament.title}`,
       });
 
       prizeRecords.push({
@@ -423,81 +447,149 @@ router.post('/:id/score', async (req, res) => {
 
       totalCashPaid += prize;
 
-      await createNotifications([
-        {
-          player_id: attempt.player_id,
-          type: 'win',
-          title: `Blitz Tournament Prize! 🎉 (${['🥇', '🥈', '🥉'][i] || '✨'})`,
-          message: `You finished #${rank}! ₦${prize.toLocaleString()} credited to your wallet.`,
-        },
-      ]);
+      const rankEmoji = ['🥇', '🥈', '🥉'][i] || '✨';
+      await createNotifications([{
+        player_id: attempt.player_id,
+        type: 'win',
+        title: `Blitz Prize! ${rankEmoji}`,
+        message: `You finished #${rank} in ${tournament.title}! ₦${prize.toLocaleString()} credited to your wallet.`,
+      }]);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // TICKET TIER (if ticket_tier_percent > 0)
+    // NON-CASH PRIZES
+    // Explicit position_prizes takes priority over ticket_tier_percent.
     // ──────────────────────────────────────────────────────────────────────────
-    const ticketTierPercent = Number(tournament.ticket_tier_percent || 10);
-    let ticketsAwarded = 0;
+    let nonCashAwarded = 0;
+    const positionPrizes = tournament.position_prizes; // JSONB array or null
 
-    if (ticketTierPercent > 0) {
-      const remainingParticipants = Math.max(0, attempts.length - cashWinnerCount);
-      const ticketCount = Math.max(1, Math.floor(remainingParticipants * (ticketTierPercent / 100)));
+    if (positionPrizes && Array.isArray(positionPrizes) && positionPrizes.length > 0) {
+      // ── Explicit per-position awards ─────────────────────────────────────
+      for (const prizeDef of positionPrizes) {
+        const rank = Number(prizeDef.position);
+        const prizeType = prizeDef.prize_type;           // 'free_ticket' | 'discount'
+        const discountPercent = prizeDef.discount_percent ? Number(prizeDef.discount_percent) : null;
 
-      // Ticket recipients = ranks below cashWinnerCount
-      for (let i = cashWinnerCount; i < Math.min(cashWinnerCount + ticketCount, attempts.length); i++) {
-        const attempt = attempts[i];
-        const rank = i + 1;
+        // Position must exist in attempts (tournament may have fewer players)
+        if (rank > attempts.length) continue;
 
-        // Check if already awarded ticket
+        const attempt = attempts[rank - 1]; // 0-indexed
+
+        // Idempotency check
         const { data: existing } = await supabase
           .from('blitz_prizes')
           .select('id')
           .eq('tournament_id', id)
           .eq('player_id', attempt.player_id)
           .eq('position', rank)
-          .single();
+          .maybeSingle();
 
         if (existing) continue;
 
+        // Generate ticket code
         const ticketCode = generateTicketCode();
         const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + 7);
+        expiresAt.setDate(expiresAt.getDate() + 30); // 30 days to use the prize
 
+        // Insert into blitz_tickets
         await supabase.from('blitz_tickets').insert({
           player_id: attempt.player_id,
           source_tournament_id: id,
           ticket_code: ticketCode,
           expires_at: expiresAt.toISOString(),
           status: 'unused',
+          // discount_percent: null → free entry; >0 → discounted entry
+          ...(prizeType === 'discount' && discountPercent ? { discount_percent: discountPercent } : {}),
         });
 
         prizeRecords.push({
           tournament_id: id,
           player_id: attempt.player_id,
           position: rank,
-          prize_type: 'free_ticket',
+          prize_type: prizeType,
           ticket_code: ticketCode,
+          amount: 0,
         });
 
-        ticketsAwarded++;
+        nonCashAwarded++;
 
-        await createNotifications([
-          {
+        // Notification copy differs by prize type
+        let notifTitle, notifMsg;
+        if (prizeType === 'free_ticket') {
+          notifTitle = 'Free Blitz Entry! 🎫';
+          notifMsg = `You finished #${rank} in ${tournament.title}! You've won a FREE entry to the next Blitz tournament. Code: ${ticketCode} (valid 30 days).`;
+        } else {
+          notifTitle = `${discountPercent}% Off Next Blitz Entry! 🏷️`;
+          notifMsg = `You finished #${rank} in ${tournament.title}! Use code ${ticketCode} for ${discountPercent}% off your next Blitz entry (valid 30 days).`;
+        }
+
+        await createNotifications([{
+          player_id: attempt.player_id,
+          type: 'win',
+          title: notifTitle,
+          message: notifMsg,
+        }]);
+      }
+    } else {
+      // ── Legacy fallback: ticket_tier_percent ────────────────────────────
+      const ticketTierPercent = Number(tournament.ticket_tier_percent || 0);
+      if (ticketTierPercent > 0) {
+        const remainingParticipants = Math.max(0, attempts.length - cashWinnerCount);
+        const ticketCount = Math.max(1, Math.floor(remainingParticipants * (ticketTierPercent / 100)));
+
+        for (let i = cashWinnerCount; i < Math.min(cashWinnerCount + ticketCount, attempts.length); i++) {
+          const attempt = attempts[i];
+          const rank = i + 1;
+
+          const { data: existing } = await supabase
+            .from('blitz_prizes')
+            .select('id')
+            .eq('tournament_id', id)
+            .eq('player_id', attempt.player_id)
+            .eq('position', rank)
+            .maybeSingle();
+
+          if (existing) continue;
+
+          const ticketCode = generateTicketCode();
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 7);
+
+          await supabase.from('blitz_tickets').insert({
+            player_id: attempt.player_id,
+            source_tournament_id: id,
+            ticket_code: ticketCode,
+            expires_at: expiresAt.toISOString(),
+            status: 'unused',
+          });
+
+          prizeRecords.push({
+            tournament_id: id,
+            player_id: attempt.player_id,
+            position: rank,
+            prize_type: 'free_ticket',
+            ticket_code: ticketCode,
+            amount: 0,
+          });
+
+          nonCashAwarded++;
+
+          await createNotifications([{
             player_id: attempt.player_id,
             type: 'win',
             title: 'Free Blitz Ticket! 🎫',
             message: `You won a free entry ticket from ${tournament.title}. Code: ${ticketCode}. Valid for 7 days.`,
-          },
-        ]);
+          }]);
+        }
       }
     }
 
-    // Insert all prize records
+    // Insert all prize records in one batch
     if (prizeRecords.length > 0) {
       await supabase.from('blitz_prizes').insert(prizeRecords);
     }
 
-    // Mark as completed
+    // Mark tournament as completed
     await supabase.from('blitz_tournaments').update({ status: 'completed' }).eq('id', id);
 
     return res.json({
@@ -507,7 +599,12 @@ router.post('/:id/score', async (req, res) => {
         total_participants: attempts.length,
         cash_winners: Math.min(cashWinnerCount, attempts.length),
         total_cash_distributed: totalCashPaid,
-        tickets_awarded: ticketsAwarded,
+        non_cash_prizes_awarded: nonCashAwarded,
+        prize_breakdown: {
+          cash_pool: cashPool,
+          platform_kept: totalRevenue - cashPool,
+          total_revenue: totalRevenue,
+        },
       },
     });
   } catch (err) {
