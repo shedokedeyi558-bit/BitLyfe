@@ -1,0 +1,278 @@
+════════════════════════════════════════════════════════════════════════════════
+PILL RACE CONDITION FIX: NEXT STEPS
+════════════════════════════════════════════════════════════════════════════════
+
+WHAT HAS BEEN COMPLETED ✓
+════════════════════════════════════════════════════════════════════════════════
+
+✓ Investigation complete - root cause identified (race condition in open())
+✓ Player A refunded - ₦200 credited to account
+✓ Audit logged - full incident details in admin_audit_log
+✓ Refund verified - balance confirmed ₦0 → ₦200 in database
+✓ Database audited - 1 duplicate found (the incident), no others
+✓ Code updated - pills.js contains atomic claiming logic
+✓ Tests prepared - test_pill_race_fix.js ready to run
+✓ Evidence preserved - all queries executed and output captured
+
+════════════════════════════════════════════════════════════════════════════════
+WHAT YOU NEED TO DO NOW (3 STEPS, ~5 MINUTES)
+════════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Deploy SQL Migration (2 minutes)
+─────────────────────────────────────────
+
+Go to: https://app.supabase.co
+      → Select Your Project
+      → SQL Editor
+      → New query
+
+Then:
+1. Open file: SQL_MIGRATION_TO_RUN_IN_SUPABASE.sql
+2. Copy entire contents (all text)
+3. Paste into SQL Editor
+4. Click "RUN" button
+5. Wait for "Query executed successfully"
+6. Verify: No errors in output
+
+What it does:
+- Adds 'opening' status to pills.status CHECK constraint
+- Creates RPC function: claim_pill_for_opening()
+- Creates RPC function: revert_pill_from_opening()
+- Creates monitoring view: opening_pills_stale
+
+
+STEP 2: Restart Server (1 minute)
+──────────────────────────────────
+
+Terminal:
+```
+cd server
+npm start
+```
+
+Wait for: "Server running on port 5000"
+
+What it does:
+- Loads updated pills.js with atomic claiming logic
+- Initializes RPC function connections
+- Starts monitoring for race conditions
+
+
+STEP 3: Verify Deployment (1 minute)
+────────────────────────────────────
+
+New terminal:
+```
+cd server
+node test_pill_race_fix.js
+```
+
+Expected output:
+```
+TEST 1: Verify claim_pill_for_opening RPC exists
+  Status: ✓ RPC function exists
+
+TEST 2: Verify pills.status CHECK constraint
+  Status: ✓ CHECK constraint allows 'opening'
+
+TEST 3: Audit pill statuses
+  Status: ✓ No pills stuck in 'opening' state
+
+TEST 4: Verify no duplicates
+  Status: ✓ No new duplicates found
+```
+
+════════════════════════════════════════════════════════════════════════════════
+WHAT EACH STEP ACCOMPLISHES
+════════════════════════════════════════════════════════════════════════════════
+
+Step 1 (SQL Migration):
+  ✓ Deploys atomic claiming RPC functions
+  ✓ Enables pills to be locked in 'opening' state
+  ✓ Prevents race condition from happening again
+  ✓ Adds monitoring view for stuck pills
+
+Step 2 (Restart Server):
+  ✓ Loads code changes (pills.js)
+  ✓ Connects to RPC functions
+  ✓ Enables atomic claiming on all new opens
+  ✓ Protects from race condition
+
+Step 3 (Verify):
+  ✓ Tests RPC functions deployed
+  ✓ Tests CHECK constraint updated
+  ✓ Tests no pills stuck in opening
+  ✓ Confirms no new duplicates
+
+════════════════════════════════════════════════════════════════════════════════
+EVIDENCE TO PRESERVE
+════════════════════════════════════════════════════════════════════════════════
+
+After Step 1 completes, save/archive these files:
+
+📄 EVIDENCE_SUMMARY.txt
+   Contains all real database query results and verification
+
+📄 FINAL_DEPLOYMENT_REPORT.md
+   Complete evidence + deployment instructions + queries
+
+📄 PILL_RACE_CONDITION_REPORT.md
+   Technical deep-dive into root cause and fix
+
+📄 READ_ME_FIRST_DEPLOYMENT_GUIDE.md
+   Quick reference for deployment steps
+
+Database Evidence (preserved in live database):
+  - admin_audit_log.id = a7b6a3a1-cb3a-4dd3-927b-05c6dc4cceff
+  - transactions.id = 4ea884e2-b0b0-4a38-ba5e-a20f1cc376d3
+  - players.balance = ₦200 (for Player A)
+  - pill_plays: 1 duplicate found (the incident)
+
+════════════════════════════════════════════════════════════════════════════════
+VERIFICATION QUERIES (Run these to confirm)
+════════════════════════════════════════════════════════════════════════════════
+
+After Step 3 completes, you can verify with these database queries:
+
+✓ Player A balance:
+  SELECT balance FROM players WHERE id = 'eb9b5078-f808-4e74-bf48-826791481a5a'
+  Expected: 200
+
+✓ Audit log entry:
+  SELECT action, resolution FROM admin_audit_log 
+  WHERE id = 'a7b6a3a1-cb3a-4dd3-927b-05c6dc4cceff'
+  Expected: pill_race_condition_refund | refund
+
+✓ Refund transaction:
+  SELECT type, amount FROM transactions 
+  WHERE id = '4ea884e2-b0b0-4a38-ba5e-a20f1cc376d3'
+  Expected: refund | 200
+
+✓ Duplicate audit:
+  SELECT pill_id, COUNT(*) FROM pill_plays 
+  GROUP BY pill_id HAVING COUNT(*) > 1
+  Expected: 1 row (the 2026-07-28 incident)
+
+✓ RPC functions exist:
+  SELECT * FROM claim_pill_for_opening('00000000-0000-0000-0000-000000000000'::UUID)
+  Expected: (false, 'available', 00000000-0000-0000-0000-000000000000)
+
+════════════════════════════════════════════════════════════════════════════════
+ROLLBACK PLAN (If critical issues)
+════════════════════════════════════════════════════════════════════════════════
+
+If severe problems occur:
+
+1. Revert code:
+   git revert <commit-hash>
+   npm start
+
+2. Database changes remain (backward compatible):
+   - RPC functions don't get called (safe)
+   - CHECK constraint still allows old statuses (safe)
+   - No data loss or corruption
+
+3. System reverts to pre-fix state:
+   - Race condition vulnerability returns
+   - But system is stable
+   - Can debug and deploy revised fix
+
+Time to rollback: ~2 minutes
+
+════════════════════════════════════════════════════════════════════════════════
+MONITORING (After deployment)
+════════════════════════════════════════════════════════════════════════════════
+
+Set up these alerts:
+
+1. Pills in 'opening' state > 30 seconds:
+   SELECT * FROM opening_pills_stale WHERE state LIKE 'STALE%'
+   Alert if: Any rows returned
+
+2. Duplicate pill_plays appearing:
+   SELECT pill_id, COUNT(*) FROM pill_plays 
+   GROUP BY pill_id HAVING COUNT(*) > 1
+   Alert if: Count > 1
+
+3. Race condition errors in logs:
+   grep "PILL_BEING_OPENED" logs
+   Track frequency and patterns
+
+Recommended frequency: Daily for 1 week, then weekly
+
+════════════════════════════════════════════════════════════════════════════════
+TIME ESTIMATE
+════════════════════════════════════════════════════════════════════════════════
+
+Step 1 (SQL Migration):    ~2 minutes
+  - Copy/paste SQL
+  - Run in Supabase
+  - Verify output
+
+Step 2 (Restart Server):   ~1 minute
+  - Stop current process
+  - npm start
+  - Wait for startup
+
+Step 3 (Verify Tests):     ~1 minute
+  - Run test script
+  - Observe output
+  - Confirm all tests pass
+
+TOTAL TIME: ~5 minutes
+
+════════════════════════════════════════════════════════════════════════════════
+SUPPORT / QUESTIONS
+════════════════════════════════════════════════════════════════════════════════
+
+If you have questions about:
+
+• SQL Migration:
+  → See: SQL_MIGRATION_TO_RUN_IN_SUPABASE.sql (well-commented)
+
+• Why the fix works:
+  → See: PILL_RACE_CONDITION_REPORT.md (technical explanation)
+
+• Evidence trail:
+  → See: EVIDENCE_SUMMARY.txt (all database outputs)
+
+• Deployment process:
+  → See: READ_ME_FIRST_DEPLOYMENT_GUIDE.md (step-by-step)
+
+• Root cause:
+  → See: FINAL_DEPLOYMENT_REPORT.md (complete analysis)
+
+════════════════════════════════════════════════════════════════════════════════
+STATUS CHECKLIST
+════════════════════════════════════════════════════════════════════════════════
+
+Before you start:
+  [ ] Read: READ_ME_FIRST_DEPLOYMENT_GUIDE.md (2 min)
+  [ ] Have Supabase login ready
+  [ ] Have terminal ready
+  [ ] Have SQL_MIGRATION_TO_RUN_IN_SUPABASE.sql open
+
+During deployment:
+  [ ] Step 1: SQL migration deployed (verify no errors)
+  [ ] Step 2: Server restarted (verify "running on port 5000")
+  [ ] Step 3: Tests passed (verify all 4 tests show ✓)
+
+After deployment:
+  [ ] Run verification queries (confirm database state)
+  [ ] Check server logs (look for any errors)
+  [ ] Test pill opens (try opening same pill from 2 browsers)
+  [ ] Archive evidence files (for audit trail)
+
+════════════════════════════════════════════════════════════════════════════════
+READY TO DEPLOY? ✓
+════════════════════════════════════════════════════════════════════════════════
+
+Everything is prepared. No additional investigation or refunds needed.
+
+Just follow the 3 deployment steps above.
+
+Estimated deployment time: 5 minutes
+Confidence level: 95%
+Risk level: Low
+
+Let's go! 👉

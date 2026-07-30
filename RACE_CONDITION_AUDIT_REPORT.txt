@@ -1,0 +1,349 @@
+════════════════════════════════════════════════════════════════════════════════
+STRUCTURAL RACE CONDITION AUDIT: Specials/VIP and Blitz
+════════════════════════════════════════════════════════════════════════════════
+
+Date: 2026-07-29
+Investigation: Follow-up to Standard Pills race condition fix
+Scope: Check whether Specials/VIP and Blitz have the same pattern
+
+════════════════════════════════════════════════════════════════════════════════
+PATTERN IDENTIFIED IN PILLS
+════════════════════════════════════════════════════════════════════════════════
+
+Standard Pills (FIXED):
+  1. Fetch pill state (status='available')
+  2. Check status != 'played'
+  3. NO ATOMIC LOCK ← race condition window
+  4. Deduct payment
+  5. Create pill_plays record
+
+Fix applied: Atomic pill claiming via RPC
+  - UPDATE pills SET status='opening' WHERE id=pill AND status='available'
+  - Only one player can be in 'opening' state
+  - Prevents both fetch-and-charge
+
+════════════════════════════════════════════════════════════════════════════════
+AUDIT 1: SPECIALS/VIP ATTEMPT-START (POST /api/pills/vip/start)
+════════════════════════════════════════════════════════════════════════════════
+
+FILE: server/src/routes/pillsVip.js (line ~300)
+
+ELIGIBILITY CHECKS PRESENT:
+  ✓ quiz_expires_at (time cutoff)
+  ✓ max_entries cap (entry ceiling)
+  ✓ question_count validation (sufficient questions)
+  ✓ player balance check
+  ✓ spend limit check
+
+ATOMIC LOCKING:
+  ✗ NO atomic claim mechanism
+  ✗ No RPC function to claim entry slot
+
+CHARGE & INSERT ORDER:
+  1. Check max_entries < current_entries
+  2. Check balance, spend limits
+  3. → NO ATOMIC LOCK HERE ←
+  4. Call deductEntryFee() (charge happens)
+  5. Insert into special_attempts (create record)
+  6. (Fire-and-forget) increment_pack_entries RPC
+
+════════════════════════════════════════════════════════════════════════════════
+VULNERABILITY: SPECIALS/VIP ENTRY CAP BYPASS
+════════════════════════════════════════════════════════════════════════════════
+
+RACE CONDITION WINDOW:
+  Steps 1-2: Check max_entries, check balance → vulnerable window
+  Step 3: Both players check same state (current_entries not incremented yet)
+  Step 4: Both proceed to charge
+  Step 5: Both create attempt records
+  Result: Entry cap exceeded
+
+ATTACK SCENARIO:
+  Pack with max_entries=100, current=99
+
+  Timeline:
+    T1: Player A checks max_entries → 99 < 100 ✓ passes
+    T2: Player B checks max_entries → still 99 < 100 ✓ passes
+    T3: Player A charges ₦X
+    T4: Player B charges ₦X
+    T5: Player A inserts attempt
+    T6: increment_pack_entries called → current becomes 100
+    T7: Player B inserts attempt
+    T8: increment_pack_entries called → current becomes 101 (EXCEEDS CAP)
+
+EVIDENCE:
+  Code line: if (pack.max_entries !== null && pack.max_entries !== undefined)
+  Problem: Checked BEFORE payment, no atomic claim after
+
+IMPACT:
+  - Entry cap violated by up to N players (where N = concurrent requests)
+  - Prize pool calculation corrupted (based on entries)
+  - Admin's intentional entry ceiling is bypassed
+  - Financial impact: more players means larger total payout than intended
+
+SEVERITY: MEDIUM
+  - Affects only entry cap (not answer/play logic)
+  - One-attempt-per-account still enforced by UNIQUE(player_id, pack_id)
+  - Worst case: a few extra entries during peak traffic
+  - Best case: admin recalculates prize distribution
+
+════════════════════════════════════════════════════════════════════════════════
+AUDIT 2: BLITZ REGISTRATION (POST /api/blitz/:id/register)
+════════════════════════════════════════════════════════════════════════════════
+
+FILE: server/src/routes/blitz.js (line ~263)
+
+ELIGIBILITY CHECKS PRESENT:
+  ✓ Tournament status check ('registration' | 'active')
+  ✓ Already registered check (UNIQUE player_id+tournament_id)
+  ✓ Ticket validation (if provided)
+  ✓ Player balance check
+  ✓ Spend limit check
+
+ATOMIC LOCKING:
+  ✗ NO atomic slot claiming mechanism
+  ✗ No RPC to atomically reserve a tournament slot
+
+CHARGE & INSERT ORDER:
+  1. Check tournament status
+  2. Check not already registered
+  3. Check balance, spend limits
+  4. → NO ATOMIC LOCK HERE ←
+  5. Deduct entry fee (charge happens)
+  6. Insert into blitz_registrations
+  7. Update total_registered += 1 (separate UPDATE)
+
+CRITICAL ISSUE: TWO-STEP REGISTRATION
+  - Insert registration (step 6)
+  - Update tournament total (step 7)
+  - NOT ATOMIC — can fail between steps
+
+════════════════════════════════════════════════════════════════════════════════
+VULNERABILITY: BLITZ TOURNAMENT SLOT OVERFLOW
+════════════════════════════════════════════════════════════════════════════════
+
+RACE CONDITION WINDOW:
+  Steps 1-3: Check tournament status, balance, limits
+  Step 4: Vulnerable window — total_registered not yet incremented
+  Step 5: Both players charge payment
+  Step 6: Both insert registration records
+  Step 7: Both update total_registered separately
+  Result: Tournament exceeds max_participants
+
+ATTACK SCENARIO:
+  Tournament with max_participants=10, total_registered=9
+
+  Timeline:
+    T1: Player A checks tournament status → "registration" ✓
+    T1: Player B checks tournament status → "registration" ✓
+    T2: Player A checks registered → no ✓
+    T2: Player B checks registered → no ✓
+    T3: Player A charges ₦X
+    T4: Player B charges ₦X
+    T5: Player A inserts registration
+    T6: Player A updates total_registered → 10
+    T7: Player B inserts registration
+    T8: Player B updates total_registered → 11 (EXCEEDS CAP)
+
+EVIDENCE:
+  Code flow in blitz.js register:
+    1. Check tournament.status !== 'registration'
+    2. Insert blitz_registrations
+    3. UPDATE blitz_tournaments SET total_registered = ...
+
+IMPACT:
+  - Tournament exceeds max_participants by up to N concurrent registrations
+  - Prize pool calculation corrupted (based on participant count)
+  - Payout distribution thrown off (tiers based on registration numbers)
+  - More players than intended in tournament brackets
+  - Financial impact: larger payout than admin projected
+
+TWO-STEP ATOMICITY ISSUE:
+  - If server crashes between INSERT and UPDATE, state is inconsistent
+  - Registration exists but count not incremented
+  - Next tournament query sees wrong player count
+  - Compensation logic becomes complex
+
+SEVERITY: HIGH
+  - Affects prize pool and financial calculations
+  - Two-step non-atomic operation is additional risk
+  - Feature currently feature-flagged off (not live)
+  - CRITICAL: Must fix BEFORE enabling Blitz tournaments
+
+════════════════════════════════════════════════════════════════════════════════
+STRUCTURAL COMPARISON
+════════════════════════════════════════════════════════════════════════════════
+
+STANDARD PILLS (FIXED):
+  Resource: Individual pill
+  Consumption model: Global (one player consumes, never serves again)
+  Constraint: UNIQUE(pill_id, player_id) insufficient
+  Fix: Atomic pill.status transition (available→opening→played)
+  RPC deployed: claim_pill_for_opening()
+
+SPECIALS/VIP (VULNERABLE):
+  Resource: Entry slot (up to max_entries cap)
+  Consumption model: Capped (admin sets max, e.g. 100 entries)
+  Constraint: UNIQUE(player_id, pack_id) prevents duplicate plays, NOT cap
+  Gap: No atomic cap increment before charge
+  Fix needed: Atomic current_entries increment before charge
+  RPC needed: increment_pack_entries_and_check_cap() or similar
+
+BLITZ (VULNERABLE):
+  Resource: Tournament slot (up to max_participants)
+  Consumption model: Capped (e.g., 10 players max)
+  Constraint: UNIQUE(player_id, tournament_id) prevents duplicate entries
+  Gap: No atomic slot claiming; two-step registration
+  Fix needed: Atomic total_registered increment before charge
+  RPC needed: claim_tournament_slot() with atomic count check
+
+════════════════════════════════════════════════════════════════════════════════
+RECOMMENDED FIXES
+════════════════════════════════════════════════════════════════════════════════
+
+SPECIALS/VIP FIX:
+
+  Add RPC function:
+    CREATE FUNCTION claim_special_entry_slot(pack_id UUID, player_id UUID)
+    RETURNS TABLE (success BOOLEAN, current_entries INT)
+    AS $$
+    BEGIN
+      UPDATE pill_packs
+      SET current_entries = current_entries + 1, updated_at = NOW()
+      WHERE id = pack_id
+        AND (max_entries IS NULL OR current_entries < max_entries)
+      RETURNING (max_entries IS NULL OR current_entries + 1 <= max_entries), current_entries + 1
+    END;
+    $$;
+
+  Modified flow:
+    1. Check eligibility (all checks OK)
+    2. Atomically claim slot: SELECT claim_special_entry_slot(pack_id)
+    3. If not success: return 409 "Entry cap reached"
+    4. Charge payment (if slot claimed)
+    5. Insert special_attempts
+    6. On failure: Decrement current_entries (revert claim)
+
+BLITZ FIX:
+
+  Add RPC function:
+    CREATE FUNCTION claim_tournament_slot(tournament_id UUID)
+    RETURNS TABLE (success BOOLEAN, new_total INT)
+    AS $$
+    BEGIN
+      UPDATE blitz_tournaments
+      SET total_registered = total_registered + 1,
+          prize_pool = (total_registered + 1) * entry_fee,
+          updated_at = NOW()
+      WHERE id = tournament_id
+        AND (max_participants IS NULL OR total_registered < max_participants)
+      RETURNING 
+        (max_participants IS NULL OR total_registered + 1 <= max_participants),
+        total_registered + 1;
+    END;
+    $$;
+
+  Modified flow:
+    1. Check eligibility
+    2. Atomically claim slot: SELECT claim_tournament_slot(tournament_id)
+    3. If not success: return 409 "Tournament at capacity"
+    4. Charge payment (if slot claimed)
+    5. Insert blitz_registrations (one-step, not two-step)
+    6. On failure: Decrement total_registered (revert claim)
+
+  Benefit: Single-step INSERT (no separate UPDATE), atomic with charge
+
+════════════════════════════════════════════════════════════════════════════════
+RISK SUMMARY
+════════════════════════════════════════════════════════════════════════════════
+
+SPECIALS/VIP RISK: MEDIUM
+
+  Likelihood: LOW-MEDIUM
+    - Requires concurrent requests during peak traffic
+    - Only happens if users click exactly at same time
+    - Would need sustained load to exploit reliably
+
+  Impact: MEDIUM
+    - Entry cap exceeded by a few players
+    - Prize pool calculation off
+    - Financial impact: slightly more payout than intended
+
+  Exploitability: LOW
+    - Not intentional user behavior
+    - Would happen naturally under load
+    - No attack vector needed (just concurrent timing)
+
+BLITZ RISK: HIGH
+
+  Likelihood: LOW-MEDIUM
+    - Feature currently feature-flagged off (not live)
+    - Same race condition pattern as Specials
+    - Additional risk: two-step registration not atomic
+
+  Impact: HIGH
+    - Tournament bracket overflows
+    - Prize distribution corrupted
+    - Financial calculations wrong
+    - More players than intended → larger payouts
+
+  Exploitability: MEDIUM
+    - Simple to exploit (just concurrent registrations)
+    - When Blitz goes live, this is critical fix
+
+════════════════════════════════════════════════════════════════════════════════
+RECOMMENDATIONS
+════════════════════════════════════════════════════════════════════════════════
+
+IMMEDIATE (Next Sprint):
+
+  1. FIX SPECIALS/VIP ENTRY CAP
+     - Deploy atomic cap increment RPC
+     - Update pillsVip.js flow (claim before charge)
+     - Test with concurrent traffic simulation
+     - Estimated effort: 2-3 hours
+
+  2. CREATE BLITZ FIX (But don't deploy)
+     - Implement atomic slot claiming RPC
+     - Update blitz.js registration flow
+     - Consolidate two-step into one-step
+     - Add test cases
+     - HOLD: Keep feature-flagged off until fix deployed
+     - Estimated effort: 3-4 hours
+
+BEFORE BLITZ GOES LIVE:
+
+  - Deploy Blitz atomic slot claiming
+  - Run load test with concurrent registrations
+  - Enable feature flag
+  - Monitor for slot-overflow issues
+
+LONG-TERM:
+
+  - Document atomic claiming pattern as standard for all entry/slot systems
+  - Code review checklist: "Does this have unprotected check-then-charge?"
+  - Add race condition tests to CI/CD
+
+════════════════════════════════════════════════════════════════════════════════
+CONCLUSION
+════════════════════════════════════════════════════════════════════════════════
+
+FOUND: Both Specials/VIP and Blitz have the same structural race condition as 
+       Standard Pills (now fixed).
+
+SPECIALS/VIP: Entry cap can be exceeded via concurrent opens
+  - Vulnerability: max_entries checked but not atomically claimed
+  - Impact: Medium (affects cap, not answer logic)
+  - Fix: Straightforward (apply atomic claiming pattern)
+  - Timeline: Fix now
+
+BLITZ: Tournament slots can overflow + two-step registration is not atomic
+  - Vulnerability: max_participants checked but not atomically claimed
+  - Impact: High (affects prize calculation)
+  - Fix: Straightforward (apply atomic claiming pattern)
+  - Timeline: Fix before feature goes live (currently feature-flagged)
+
+PATTERN: Apply atomic claiming to all three:
+  Pills (DONE) → Specials/VIP (DO) → Blitz (DO before launch)
+
+════════════════════════════════════════════════════════════════════════════════

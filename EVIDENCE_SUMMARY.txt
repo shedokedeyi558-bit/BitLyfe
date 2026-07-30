@@ -1,0 +1,222 @@
+════════════════════════════════════════════════════════════════════════════════
+PILL RACE CONDITION FIX: EVIDENCE SUMMARY
+════════════════════════════════════════════════════════════════════════════════
+
+EXECUTED ON: 2026-07-29 07:49:28 UTC
+DATABASE: Live Supabase production
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 1: REFUND EXECUTION - REAL DATABASE OUTPUT
+════════════════════════════════════════════════════════════════════════════════
+
+PLAYER A (eb9b5078-f808-4e74-bf48-826791481a5a):
+
+Before Refund:
+  Balance: ₦0
+  Status: Charged ₦200 for pill, abandoned (never answered)
+
+Refund Action:
+  Timestamp: 2026-07-29T07:49:28.178Z
+  Amount: +₦200
+  Reason: PILL_RACE_CONDITION
+
+After Refund:
+  Balance: ₦200 ✓
+  Verified in database: YES ✓
+
+AUDIT LOG ENTRY CREATED:
+  ID: a7b6a3a1-cb3a-4dd3-927b-05c6dc4cceff
+  Action: pill_race_condition_refund
+  Resolution: refund
+  Created: 2026-07-29T07:49:28.763606+00:00
+  
+  Payload:
+  {
+    "pill_id": "1bc3f6e7-116d-451d-a53f-7dca3363c408",
+    "refund_amount": 200,
+    "before_balance": 0,
+    "after_balance": 200,
+    "reason_code": "PILL_RACE_CONDITION",
+    "incident_type": "concurrent_pill_open_charging_failure",
+    "incident_date": "2026-07-28T20:39:02.846718+00:00"
+  }
+
+TRANSACTION RECORD CREATED:
+  ID: 4ea884e2-b0b0-4a38-ba5e-a20f1cc376d3
+  Type: refund
+  Amount: +₦200
+  Reference: PILL_RACE_CONDITION_REFUND_2026-07-29
+  Created: 2026-07-29T07:49:28
+  Description: Pill race condition refund - charged ₦200 for pill 1bc3f6e7...
+              opened concurrently with another player on 2026-07-28
+
+VERIFICATION RESULT:
+  ✓ Player A balance updated: ₦0 → ₦200
+  ✓ Verified in live database: YES
+  ✓ Match: YES
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 2: DUPLICATE AUDIT - REAL DATABASE OUTPUT
+════════════════════════════════════════════════════════════════════════════════
+
+Query Executed:
+  SELECT pill_id, COUNT(*) as play_count FROM pill_plays GROUP BY pill_id 
+  HAVING COUNT(*) > 1
+
+Results:
+  Total pills in database: 205
+  Total pill_plays entries: 5
+  Pills with multiple plays: 1
+
+DUPLICATES FOUND:
+
+  Pill ID: 1bc3f6e7-116d-451d-a53f-7dca3363c408
+  Play count: 2
+  
+  [1] Player: a7c13796-abea-47cb-8e57-cebc00da81f8 (PLAYER B)
+      Locked: YES (2026-07-28T20:41:28.036+00:00)
+      Won: true
+      Status: LEGITIMATE WIN
+      
+  [2] Player: eb9b5078-f808-4e74-bf48-826791481a5a (PLAYER A - REFUNDED)
+      Locked: NO (NULL)
+      Won: false
+      Status: ABANDONED (never answered)
+
+NO OTHER DUPLICATES FOUND ✓
+  Database is clean except for this one incident
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 3: TRANSACTION HISTORY FOR PLAYER A
+════════════════════════════════════════════════════════════════════════════════
+
+Transaction #1:
+  Type: deposit
+  Amount: +₦200
+  Date: 2026-07-28T20:38
+  Description: Deposit of ₦200
+
+Transaction #2:
+  Type: pill_open
+  Amount: -₦200
+  Date: 2026-07-28T20:39
+  Description: Opened pill: What is the only letter that does not appear...
+  Status: FRAUDULENT (charged for pill served to another player)
+
+Transaction #3:
+  Type: refund
+  Amount: +₦200
+  Date: 2026-07-29T07:49
+  Reference: PILL_RACE_CONDITION_REFUND_2026-07-29
+  Description: Pill race condition refund - charged ₦200 for pill 1bc3f6e7...
+  Status: RESOLVED ✓
+
+FINAL BALANCE: ₦200 ✓
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 4: PILL DETAILS
+════════════════════════════════════════════════════════════════════════════════
+
+Pill ID: 1bc3f6e7-116d-451d-a53f-7dca3363c408
+Question: What is the only letter that does not appear in the official...
+Correct Answer: Q
+Status: played
+Pack: Twist_Challenger (4-pill standard pack)
+Entry Fee: ₦200
+Prize: ₦15,000
+
+Pack Status: inactive (all 4 pills played)
+
+════════════════════════════════════════════════════════════════════════════════
+SECTION 5: VERIFICATION SUMMARY
+════════════════════════════════════════════════════════════════════════════════
+
+REFUND VERIFICATION:
+  ✓ Audit log entry exists: a7b6a3a1-cb3a-4dd3-927b-05c6dc4cceff
+  ✓ Transaction record exists: 4ea884e2-b0b0-4a38-ba5e-a20f1cc376d3
+  ✓ Player balance updated: ₦0 → ₦200
+  ✓ Verified in live database: YES
+
+DUPLICATE VERIFICATION:
+  ✓ 1 duplicate confirmed: pill 1bc3f6e7...
+  ✓ No other duplicates: database clean
+  ✓ Root cause: race condition (20:36:53 vs 20:39:02)
+
+CODE VERIFICATION:
+  ✓ pills.js updated with atomic claiming
+  ✓ RPC function calls present (before payment)
+  ✓ Revert logic present (on failure)
+  ✓ Error codes defined (PILL_BEING_OPENED, PILL_NO_LONGER_AVAILABLE)
+
+════════════════════════════════════════════════════════════════════════════════
+DEPLOYMENT STATUS
+════════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Database Migration
+  Status: ⏳ PENDING (awaiting manual Supabase SQL execution)
+  File: SQL_MIGRATION_TO_RUN_IN_SUPABASE.sql
+  
+STEP 2: Refund Player A
+  Status: ✓ COMPLETE
+  Evidence: Refund audit log + transaction record in database
+  
+STEP 3: Deploy Updated Code
+  Status: ✓ READY
+  File: server/src/routes/pills.js (already updated)
+  Action: Restart server
+
+STEP 4: Audit Database
+  Status: ✓ COMPLETE
+  Evidence: Duplicate query results above
+
+STEP 5: Verification Tests
+  Status: ⏳ PENDING (after SQL migration deployed)
+  File: server/test_pill_race_fix.js
+
+════════════════════════════════════════════════════════════════════════════════
+KEY EVIDENCE IDENTIFIERS (For Audit Trail)
+════════════════════════════════════════════════════════════════════════════════
+
+Admin Audit Log:
+  Record ID: a7b6a3a1-cb3a-4dd3-927b-05c6dc4cceff
+  Action: pill_race_condition_refund
+  
+Refund Transaction:
+  Transaction ID: 4ea884e2-b0b0-4a38-ba5e-a20f1cc376d3
+  Reference: PILL_RACE_CONDITION_REFUND_2026-07-29
+  
+Affected Pill:
+  Pill ID: 1bc3f6e7-116d-451d-a53f-7dca3363c408
+  
+Affected Player:
+  Player ID: eb9b5078-f808-4e74-bf48-826791481a5a (refunded ₦200)
+  
+Query for Verification:
+  SELECT balance FROM players WHERE id = 'eb9b5078-f808-4e74-bf48-826791481a5a'
+  Expected: 200
+
+════════════════════════════════════════════════════════════════════════════════
+CONCLUSION
+════════════════════════════════════════════════════════════════════════════════
+
+✓ Refund: COMPLETED AND VERIFIED
+  Amount: ₦200
+  Audit trail: Complete
+  Database evidence: Preserved
+  
+✓ Audit: COMPLETED AND VERIFIED
+  Duplicates found: 1 (the incident)
+  Other duplicates: 0 (database clean)
+  
+✓ Code: READY TO DEPLOY
+  Changes made: Atomic claiming logic
+  Testing: Ready
+  
+⏳ Pending: SQL migration deployment (manual step in Supabase)
+
+All evidence is preserved in the production database and is auditable.
+
+════════════════════════════════════════════════════════════════════════════════
+Report generated: 2026-07-29T07:49:28Z
+Status: READY FOR PRODUCTION DEPLOYMENT
+════════════════════════════════════════════════════════════════════════════════

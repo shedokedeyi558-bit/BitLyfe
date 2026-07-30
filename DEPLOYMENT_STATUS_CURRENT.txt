@@ -1,0 +1,233 @@
+═══════════════════════════════════════════════════════════════════════════════
+PILL RACE CONDITION FIX: CURRENT DEPLOYMENT STATUS
+═══════════════════════════════════════════════════════════════════════════════
+
+Date: July 29, 2026
+Test Run Time: Just completed
+
+═══════════════════════════════════════════════════════════════════════════════
+INVESTIGATION & REFUND: ✓ COMPLETE
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ Root cause identified: Race condition in POST /api/pills/open
+✓ Player A refunded: ₦200 credited to account (eb9b5078-f808-4e74-bf48-826791481a5a)
+✓ Audit logged: admin_audit_log entry with full details
+✓ Transaction recorded: transactions table with refund receipt
+✓ Database verified: No other duplicates found (only the 1 incident)
+
+═══════════════════════════════════════════════════════════════════════════════
+CODE DEPLOYMENT: ✓ COMPLETE
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ Updated pills.js with atomic claiming logic
+  - Location: server/src/routes/pills.js (lines 540-560)
+  - Calls: supabase.rpc('claim_pill_for_opening', ...)
+  - Fallback: Revert claim if billing fails
+  - Status: Ready to load on server restart
+
+═══════════════════════════════════════════════════════════════════════════════
+DATABASE MIGRATION: ⏳ PENDING
+═══════════════════════════════════════════════════════════════════════════════
+
+TEST RESULTS (RUN JUST NOW):
+  ❌ RPC function not deployed: "Could not find function claim_pill_for_opening"
+  ❌ CHECK constraint not updated: "opening" status not allowed
+  ✓ No pills stuck in 'opening' state (0 pills)
+  ✓ No duplicate pill_plays (0 duplicates)
+
+WHAT NEEDS TO RUN:
+  The SQL migration in: DATABASE_MIGRATION_PILL_RACE_FIX.sql
+  
+  This will:
+    1. Update pills.status CHECK constraint to allow 'opening'
+    2. Create RPC function: claim_pill_for_opening()
+    3. Create RPC function: revert_pill_from_opening()
+    4. Create monitoring view: opening_pills_stale
+
+  LIMITATION: Cannot run via JavaScript/Node client (Supabase security restriction)
+  ACTION: Must run manually in Supabase SQL Editor (copy/paste SQL)
+
+═══════════════════════════════════════════════════════════════════════════════
+DEPLOYMENT STEPS (IN ORDER)
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Deploy SQL Migration (Manual)
+─────────────────────────────────────
+
+  Timeline: ~2 minutes
+
+  1. Go to: https://app.supabase.co
+  2. Select your project
+  3. Click: SQL Editor
+  4. Click: New query
+  5. Open file: DATABASE_MIGRATION_PILL_RACE_FIX.sql
+  6. Copy ALL contents (entire file)
+  7. Paste into Supabase SQL Editor
+  8. Click: RUN button (top-right)
+  9. Wait for: "Query executed successfully" (green checkmark)
+  10. Verify: No errors in output panel
+
+  Expected output (no errors):
+    ├─ Query executed successfully
+    ├─ psycopg2.ProgrammingError: function ... already exists (OK if idempotent)
+    └─ 0 rows returned (for verification queries at end)
+
+STEP 2: Restart Server
+──────────────────────
+
+  Timeline: ~1 minute
+
+  In a terminal:
+    cd server
+    npm start
+
+  Wait for: "Server running on port 5000"
+
+  What it does:
+    - Loads updated pills.js
+    - Connects to RPC functions
+    - Enables atomic claiming on all opens
+    - Starts serving requests
+
+STEP 3: Verify Deployment
+─────────────────────────
+
+  Timeline: ~1 minute
+
+  In a NEW terminal:
+    cd server
+    node test_pill_race_fix.js
+
+  Expected output:
+    ✓ RPC function claim_pill_for_opening is available
+    ✓ CHECK constraint allows "opening" status
+    ✓ No pills stuck in "opening" status
+    ✓ No duplicate pill_plays entries found
+
+  If all show ✓: DEPLOYMENT SUCCESS
+
+  If any show ❌: Do NOT proceed until fixed
+
+═══════════════════════════════════════════════════════════════════════════════
+WHAT EACH STEP DOES
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Database Migration
+
+  Before:
+    - pills.status can be: 'available', 'played', 'expired'
+    - No atomic pill claiming
+    - Two players can open same pill simultaneously
+
+  After:
+    - pills.status can be: 'available', 'opening', 'played', 'expired'
+    - RPC claim_pill_for_opening() does atomic transition
+    - Only one player can be in 'opening' state
+
+STEP 2: Server Restart
+
+  Before:
+    - pills.js still has old open() logic (no claiming)
+    - Server doesn't know about RPC functions
+    - Requests use old code
+
+  After:
+    - pills.js open() calls RPC to claim pill
+    - If claim fails: rejects request with 409 PILL_BEING_OPENED
+    - All new opens are protected
+
+STEP 3: Verification
+
+  Tests:
+    1. RPC functions exist (callable)
+    2. CHECK constraint updated ('opening' allowed)
+    3. No pills stuck (system is clean)
+    4. No duplicates (issue fully resolved)
+
+═══════════════════════════════════════════════════════════════════════════════
+EVIDENCE (ALREADY COLLECTED)
+═══════════════════════════════════════════════════════════════════════════════
+
+Player A Refund:
+  ✓ Balance: ₦200 (confirmed in database)
+  ✓ Audit: admin_audit_log entry a7b6a3a1-cb3a-4dd3-927b-05c6dc4cceff
+  ✓ Transaction: transactions entry 4ea884e2-b0b0-4a38-ba5e-a20f1cc376d3
+
+Duplicate Audit:
+  ✓ Query: SELECT * FROM pill_plays GROUP BY pill_id HAVING COUNT(*) > 1
+  ✓ Result: 0 rows (no current duplicates)
+  ✓ Previous: 1 row (pill 1bc3f6e7... with 2 plays — now fixed)
+
+═══════════════════════════════════════════════════════════════════════════════
+ESTIMATED TIME
+═══════════════════════════════════════════════════════════════════════════════
+
+Step 1 (SQL):       2 minutes (manual copy/paste + run)
+Step 2 (Restart):   1 minute (npm start + wait)
+Step 3 (Verify):    1 minute (run test, check output)
+
+TOTAL: ~5 minutes
+
+═══════════════════════════════════════════════════════════════════════════════
+ROLLBACK (IF NEEDED)
+═══════════════════════════════════════════════════════════════════════════════
+
+If critical issues arise:
+
+  git revert <commit-hash>
+  npm start
+
+  Database changes are backward-compatible:
+    - RPC functions won't be called
+    - CHECK constraint still allows old statuses
+    - No data loss or corruption
+    - System reverts to pre-fix state
+
+  Time to rollback: ~2 minutes
+
+═══════════════════════════════════════════════════════════════════════════════
+POST-DEPLOYMENT MONITORING
+═══════════════════════════════════════════════════════════════════════════════
+
+Daily checks (for 1 week):
+
+  1. Pills in 'opening' state:
+     SELECT * FROM opening_pills_stale WHERE state LIKE 'STALE%'
+     Expected: 0 rows
+
+  2. New duplicates:
+     SELECT pill_id, COUNT(*) FROM pill_plays 
+     GROUP BY pill_id HAVING COUNT(*) > 1
+     Expected: 0 rows
+
+  3. Server logs:
+     grep "PILL_BEING_OPENED" logs
+     Track frequency
+
+═══════════════════════════════════════════════════════════════════════════════
+STRUCTURAL AUDIT (SEPARATE TASK)
+═══════════════════════════════════════════════════════════════════════════════
+
+NOTE: The SAME race condition pattern exists in:
+  - Specials/VIP entry cap (server/src/routes/pillsVip.js)
+  - Blitz tournament registration (server/src/routes/blitz.js)
+
+Findings in: RACE_CONDITION_AUDIT_REPORT.txt
+
+Status: DOCUMENTED (not yet fixed)
+Timeline: Fix after pill fix is deployed and stable
+Severity: Medium (Specials) / High (Blitz, currently feature-flagged)
+
+═══════════════════════════════════════════════════════════════════════════════
+READY TO DEPLOY?
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ Investigation complete
+✓ Code changes done
+✓ Player A refunded
+✓ Test verification prepared
+✓ SQL migration ready
+
+Next action: Run Step 1 (Deploy SQL to Supabase)
+
+═══════════════════════════════════════════════════════════════════════════════
