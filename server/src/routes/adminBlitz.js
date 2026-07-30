@@ -238,65 +238,10 @@ router.put('/:id', async (req, res) => {
 // ─── QUESTION MANAGEMENT ──────────────────────────────────────────────────────
 
 /**
- * POST /api/admin/blitz/:id/questions
- * Add a question to tournament.
- * Body: { question, format, options, correct_answer, order_index, image_url? }
- *
- * image_url: a Supabase Storage public URL (upload via POST /api/admin/blitz/:id/questions/upload-image first)
- */
-router.post('/:id/questions', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { question, format, options, correct_answer, order_index, image_url } = req.body;
-
-    if (!question || !format || !correct_answer) {
-      return res.status(400).json({ success: false, error: 'question, format, and correct_answer are required' });
-    }
-
-    if (!['multiple_choice', 'type_answer'].includes(format)) {
-      return res.status(400).json({ success: false, error: 'format must be multiple_choice or type_answer' });
-    }
-
-    if (format === 'multiple_choice' && (!options || !Array.isArray(options) || options.length < 2)) {
-      return res.status(400).json({ success: false, error: 'multiple_choice questions require at least 2 options' });
-    }
-
-    if (format === 'multiple_choice' && !options.includes(correct_answer)) {
-      return res.status(400).json({ success: false, error: 'correct_answer must be one of the provided options' });
-    }
-
-    // Get current question count for auto order_index
-    const { count } = await supabase
-      .from('blitz_questions')
-      .select('id', { count: 'exact', head: true })
-      .eq('tournament_id', id);
-
-    const { data, error } = await supabase
-      .from('blitz_questions')
-      .insert({
-        tournament_id: id,
-        question,
-        format,
-        options: options || null,
-        correct_answer,
-        image_url: image_url || null,
-        order_index: order_index ?? (count || 0) + 1,
-      })
-      .select()
-      .single();
-
-    if (error) return res.status(500).json({ success: false, error: 'Failed to add question: ' + error.message });
-
-    return res.status(201).json({ success: true, data: { question: data } });
-  } catch (err) {
-    console.error('Add blitz question error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to add question' });
-  }
-});
-
-/**
  * POST /api/admin/blitz/:id/questions/upload-image
  * Upload an image for a blitz question to Supabase Storage.
+ * MUST be registered BEFORE /:id/questions to avoid Express matching
+ * "upload-image" as a question body on the generic POST /:id/questions route.
  * Content-Type: multipart/form-data
  * Field: image (file, max 5MB, jpeg/png/webp/gif)
  *
@@ -383,6 +328,63 @@ router.post('/:id/questions/upload-image', async (req, res) => {
     console.error('Upload blitz image error:', err);
     const statusCode = err.message?.includes('Unsupported') || err.message?.includes('5 MB') ? 400 : 500;
     return res.status(statusCode).json({ success: false, error: err.message || 'Image upload failed' });
+  }
+});
+
+/**
+ * POST /api/admin/blitz/:id/questions
+ * Add a question to tournament.
+ * Body: { question, format, options, correct_answer, order_index, image_url? }
+ *
+ * image_url: a Supabase Storage public URL (upload via POST /api/admin/blitz/:id/questions/upload-image first)
+ */
+router.post('/:id/questions', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { question, format, options, correct_answer, order_index, image_url } = req.body;
+
+    if (!question || !format || !correct_answer) {
+      return res.status(400).json({ success: false, error: 'question, format, and correct_answer are required' });
+    }
+
+    if (!['multiple_choice', 'type_answer'].includes(format)) {
+      return res.status(400).json({ success: false, error: 'format must be multiple_choice or type_answer' });
+    }
+
+    if (format === 'multiple_choice' && (!options || !Array.isArray(options) || options.length < 2)) {
+      return res.status(400).json({ success: false, error: 'multiple_choice questions require at least 2 options' });
+    }
+
+    if (format === 'multiple_choice' && !options.includes(correct_answer)) {
+      return res.status(400).json({ success: false, error: 'correct_answer must be one of the provided options' });
+    }
+
+    // Get current question count for auto order_index
+    const { count } = await supabase
+      .from('blitz_questions')
+      .select('id', { count: 'exact', head: true })
+      .eq('tournament_id', id);
+
+    const { data, error } = await supabase
+      .from('blitz_questions')
+      .insert({
+        tournament_id: id,
+        question,
+        format,
+        options: options || null,
+        correct_answer,
+        image_url: image_url || null,
+        order_index: order_index ?? (count || 0) + 1,
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to add question: ' + error.message });
+
+    return res.status(201).json({ success: true, data: { question: data } });
+  } catch (err) {
+    console.error('Add blitz question error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to add question' });
   }
 });
 
