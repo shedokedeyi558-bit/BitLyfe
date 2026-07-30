@@ -12,7 +12,7 @@ const walletRoutes = require('./routes/wallet');
 const adminRoutes = require('./routes/admin');
 const withdrawalRoutes = require('./routes/withdrawals');
 const challengeRoutes = require('./routes/challenges');
-const pillsRoutes = require('./routes/pills');
+const pillsRoutes = require('./routes/pills'); // kept for reference, unmounted — standard pills removed
 const predictionsRoutes = require('./routes/predictions');
 const adminPillsRoutes = require('./routes/adminPills');
 const adminPredictionsRoutes = require('./routes/adminPredictions');
@@ -151,7 +151,7 @@ app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/game/play', gameLimiter);
 app.use('/api/game/submit', gameLimiter);
 app.use('/api/game', gameRoutes);
-app.use('/api/pills', gameLimiter, pillsRoutes);
+// Standard pills (/api/pills) removed — only Specials remain (/api/pills/vip)
 app.use('/api/pills/vip', gameLimiter, pillsVipRoutes);
 // /api/pills/special removed — pillsSpecial.js was dead code (zero frontend calls)
 // All Specials/VIP gameplay goes through /api/pills/vip via pillsVip.js
