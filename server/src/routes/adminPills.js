@@ -27,9 +27,16 @@ router.use(adminAuth);
 /**
  * GET /api/admin/pills/packs
  * List all packs with their pills (admin view — includes all fields)
+ * Query params:
+ *   ?includeInactive=false (default: false)
+ *     - false: exclude archived packs (status='inactive' AND available_count=0)
+ *     - true: include all packs including archived ones
  */
 router.get('/packs', async (req, res) => {
   try {
+    const { includeInactive = 'false' } = req.query;
+    const shouldIncludeInactive = includeInactive === 'true';
+
     // Use RPC to bypass PostgREST schema cache — direct .select() on pill_packs
     // fails with PGRST204 because the cache is stale (missing recently-added columns).
     const { data: packsRaw, error: packsErr } = await supabase.rpc('admin_get_pill_packs');
@@ -128,6 +135,15 @@ router.get('/packs', async (req, res) => {
           ? Math.round(pack.total_time_seconds / 60)
           : null,
       };
+    })
+    // ── Filter archived packs if includeInactive=false ──────────────────────
+    // A pack is "archived" when: status='inactive' AND no available pills remain
+    // This allows admins to hide fully-sold-out inactive packs without deleting them
+    .filter((pack) => {
+      if (shouldIncludeInactive) return true;  // includeInactive=true → show all
+      // includeInactive=false (default) → hide archived (inactive + empty)
+      const isArchived = pack.status === 'inactive' && pack.available_count === 0;
+      return !isArchived;
     });
 
     return res.json({ success: true, data: { packs: result } });
