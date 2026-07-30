@@ -323,7 +323,8 @@ CREATE TABLE IF NOT EXISTS blitz_tournaments (
   total_payout_percent DECIMAL(5,2) DEFAULT 40.00,
   ticket_tier_percent DECIMAL(5,2) DEFAULT 10.00,
   guaranteed_minimum INTEGER,
-  position_prizes JSONB DEFAULT NULL,  -- explicit per-position non-cash prizes
+  position_prizes JSONB DEFAULT NULL,       -- explicit per-position non-cash prizes
+  per_question_time_seconds INTEGER DEFAULT NULL,  -- strict per-question countdown (NULL = disabled)
   created_by UUID,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -337,6 +338,7 @@ CREATE TABLE IF NOT EXISTS blitz_questions (
   format TEXT CHECK (format IN ('multiple_choice', 'type_answer')) NOT NULL,
   options JSONB,
   correct_answer TEXT NOT NULL,
+  image_url TEXT DEFAULT NULL,             -- optional image (Supabase Storage URL)
   order_index INTEGER NOT NULL,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -366,6 +368,7 @@ CREATE TABLE IF NOT EXISTS blitz_attempts (
   started_at TIMESTAMP WITH TIME ZONE NOT NULL,
   completed_at TIMESTAMP WITH TIME ZONE,
   status TEXT CHECK (status IN ('in_progress', 'completed')) DEFAULT 'in_progress',
+  options_order JSONB DEFAULT NULL,        -- per-player shuffled options map { [question_id]: [opt,...] }
   UNIQUE(tournament_id, player_id)
 );
 

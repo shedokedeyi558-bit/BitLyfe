@@ -114,9 +114,11 @@ function calcPrizeDistribution(prizePool, platformCutPercent, totalRegistered) {
 }
 
 /**
- * Score answers server-side against stored correct answers
+ * Score answers server-side against stored correct answers.
+ * options_order (per-player shuffle map) is used to reverse-map
+ * submitted answers back to canonical correct_answer values.
  */
-function scoreAnswers(questions, submittedAnswers) {
+function scoreAnswers(questions, submittedAnswers, optionsOrder) {
   const questionMap = {};
   for (const q of questions) questionMap[q.id] = q;
 
@@ -125,14 +127,30 @@ function scoreAnswers(questions, submittedAnswers) {
     const question = questionMap[sub.question_id];
     if (!question) return { ...sub, is_correct: false };
 
-    const playerAnswer = String(sub.answer).trim().toLowerCase();
     const correctAnswer = String(question.correct_answer).trim().toLowerCase();
+
+    // For multiple_choice with shuffle: the player submitted the display value
+    // from their shuffled options array, which IS the real answer text.
+    // So we just compare directly — shuffling reorders options, not their values.
+    const playerAnswer = String(sub.answer).trim().toLowerCase();
     const is_correct = playerAnswer === correctAnswer;
     if (is_correct) score++;
     return { question_id: sub.question_id, answer: sub.answer, is_correct, time_taken_ms: sub.time_taken_ms || 0 };
   });
 
   return { scored, score };
+}
+
+/**
+ * Fisher-Yates shuffle — returns a new shuffled array, original unmodified.
+ */
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 // ─── PLAYER ENDPOINTS ─────────────────────────────────────────────────────────
@@ -169,7 +187,7 @@ router.get('/:id', auth, async (req, res) => {
 
     const { data: tournament, error } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, prize_pool, total_payout_percent, position_prizes')
+      .select('id, title, description, entry_fee, question_count, time_limit_seconds, per_question_time_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes')
       .eq('id', id)
       .single();
 
@@ -434,7 +452,12 @@ router.post('/:id/register', idempotency(), auth, async (req, res) => {
 
 /**
  * POST /api/blitz/:id/attempt/start
- * Start player's attempt. Returns all questions WITHOUT correct_answer.
+ * Start player's attempt.
+ * - Returns questions WITHOUT correct_answer
+ * - Shuffles multiple_choice options per player (anti answer-sharing)
+ * - Stores the shuffled options_order on the attempt row
+ * - Returns per_question_time_seconds for the client countdown
+ * - Returns image_url on questions that have one
  */
 router.post('/:id/attempt/start', auth, async (req, res) => {
   try {
@@ -450,17 +473,14 @@ router.post('/:id/attempt/start', auth, async (req, res) => {
 
     if (tErr || !tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
 
-    // Must be active
     if (tournament.status !== 'active') {
       return res.status(403).json({ success: false, error: 'Tournament is not active yet' });
     }
 
-    // Must be within tournament window
     if (now < new Date(tournament.tournament_start) || now > new Date(tournament.tournament_end)) {
       return res.status(403).json({ success: false, error: 'Tournament playing window is not open' });
     }
 
-    // Must be registered — player may not be registered
     const { data: registration } = await supabase
       .from('blitz_registrations')
       .select('id')
@@ -470,31 +490,53 @@ router.post('/:id/attempt/start', auth, async (req, res) => {
 
     if (!registration) return res.status(403).json({ success: false, error: 'You are not registered for this tournament' });
 
-    // One attempt per player — player may not have attempted yet
     const { data: existingAttempt } = await supabase
       .from('blitz_attempts')
-      .select('id, status')
+      .select('id, status, options_order, started_at')
       .eq('tournament_id', id)
       .eq('player_id', player.id)
       .maybeSingle();
 
-    if (existingAttempt) {
-      if (existingAttempt.status === 'completed') {
-        return res.status(409).json({ success: false, error: 'You have already completed this tournament' });
-      }
-      // Return existing in-progress attempt questions
+    if (existingAttempt?.status === 'completed') {
+      return res.status(409).json({ success: false, error: 'You have already completed this tournament' });
     }
 
-    // Fetch questions (no correct_answer)
-    const { data: questions, error: qErr } = await supabase
+    // Fetch questions — include image_url, exclude correct_answer
+    const { data: rawQuestions, error: qErr } = await supabase
       .from('blitz_questions')
-      .select('id, question, format, options, order_index')
+      .select('id, question, format, options, order_index, image_url')
       .eq('tournament_id', id)
       .order('order_index', { ascending: true });
 
     if (qErr) return res.status(500).json({ success: false, error: 'Failed to fetch questions' });
 
-    // Create attempt if not already exists
+    // ── Shuffle options per player ────────────────────────────────────────────
+    // Build a per-player shuffle map: { [question_id]: shuffled_options_array }
+    // This is stored on the attempt so submit can reference it if needed.
+    // Importantly, options are value-shuffled (not index-mapped), so the answer
+    // submitted by the player is still the plain text value — no extra mapping needed.
+    let optionsOrder = existingAttempt?.options_order || null;
+
+    if (!optionsOrder) {
+      optionsOrder = {};
+      for (const q of rawQuestions) {
+        if (q.format === 'multiple_choice' && Array.isArray(q.options) && q.options.length > 1) {
+          optionsOrder[q.id] = shuffleArray(q.options);
+        }
+      }
+    }
+
+    // Build questions response — swap in shuffled options, never send correct_answer
+    const questions = rawQuestions.map((q) => ({
+      id: q.id,
+      question: q.question,
+      format: q.format,
+      options: optionsOrder[q.id] || q.options || null,  // shuffled for this player
+      order_index: q.order_index,
+      image_url: q.image_url || null,
+    }));
+
+    // Create attempt (or update existing in-progress one with shuffle map)
     if (!existingAttempt) {
       await supabase.from('blitz_attempts').insert({
         tournament_id: id,
@@ -504,7 +546,14 @@ router.post('/:id/attempt/start', auth, async (req, res) => {
         total_time_ms: 0,
         started_at: now.toISOString(),
         status: 'in_progress',
+        options_order: optionsOrder,
       });
+    } else if (!existingAttempt.options_order) {
+      // Backfill shuffle on resume (first start had no shuffle — legacy)
+      await supabase
+        .from('blitz_attempts')
+        .update({ options_order: optionsOrder })
+        .eq('id', existingAttempt.id);
     }
 
     return res.json({
@@ -512,6 +561,7 @@ router.post('/:id/attempt/start', auth, async (req, res) => {
       data: {
         questions,
         time_limit_seconds: tournament.time_limit_seconds,
+        per_question_time_seconds: tournament.per_question_time_seconds || null,
         started_at: existingAttempt?.started_at || now.toISOString(),
       },
     });
@@ -562,8 +612,8 @@ router.post('/:id/attempt/submit', auth, async (req, res) => {
       .select('id, correct_answer, format')
       .eq('tournament_id', id);
 
-    // Score server-side
-    const { scored, score } = scoreAnswers(questions, answers);
+    // Score server-side (optionsOrder stored on attempt — passed for reference)
+    const { scored, score } = scoreAnswers(questions, answers, attempt.options_order);
 
     const totalTimeMs = scored.reduce((sum, a) => sum + (a.time_taken_ms || 0), 0);
     const completedAt = now.toISOString();

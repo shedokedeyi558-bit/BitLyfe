@@ -51,20 +51,15 @@ router.get('/', async (req, res) => {
  * Body: {
  *   title, description, entry_fee, question_count, time_limit_seconds,
  *   registration_start, tournament_start, tournament_end,
- *   max_participants    (default 20)
- *   min_participants    (default 1)
- *   cash_winner_count   (default 1)
- *   payout_distribution (array summing to 100, length === cash_winner_count, default [100])
- *   total_payout_percent (default 80 — platform keeps 20%)
- *   ticket_tier_percent  (default 0 — overridden by position_prizes)
- *   guaranteed_minimum  (optional integer floor prize in naira)
- *
- *   position_prizes (optional JSONB array — explicit non-cash awards per rank):
- *     [
- *       { "position": 2, "prize_type": "free_ticket" },
- *       { "position": 3, "prize_type": "discount", "discount_percent": 50 }
- *     ]
- *   When position_prizes is set, ticket_tier_percent is ignored for those positions.
+ *   max_participants         (default 20; warn ≥ 50 — server load advisory)
+ *   min_participants         (default 1)
+ *   per_question_time_seconds (default 8 — strict per-question countdown)
+ *   cash_winner_count        (default 1)
+ *   payout_distribution      (array summing to 100, length === cash_winner_count)
+ *   total_payout_percent     (default 80 — platform keeps 20%)
+ *   ticket_tier_percent      (default 0 — use position_prizes instead)
+ *   guaranteed_minimum       (optional integer floor prize in naira)
+ *   position_prizes          (optional JSONB array for explicit 2nd/3rd prizes)
  * }
  */
 router.post('/', async (req, res) => {
@@ -74,6 +69,7 @@ router.post('/', async (req, res) => {
       registration_start, tournament_start, tournament_end,
       max_participants = 20,
       min_participants = 1,
+      per_question_time_seconds = 8,
       cash_winner_count = 1,
       payout_distribution = [100],
       total_payout_percent = 80,
@@ -88,6 +84,11 @@ router.post('/', async (req, res) => {
         success: false,
         error: 'title, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end are required',
       });
+    }
+
+    // Validate per_question_time_seconds
+    if (per_question_time_seconds !== null && (Number(per_question_time_seconds) < 3 || Number(per_question_time_seconds) > 120)) {
+      return res.status(400).json({ success: false, error: 'per_question_time_seconds must be between 3 and 120 seconds' });
     }
 
     // Validate payout_distribution
@@ -138,9 +139,27 @@ router.post('/', async (req, res) => {
       }
     }
 
-    let warning = null;
+    // Collect warnings (non-blocking advisories returned alongside success)
+    const warnings = [];
+
     if (total_payout_percent > 90) {
-      warning = 'This leaves less than 10% platform margin';
+      warnings.push('total_payout_percent above 90% — platform keeps less than 10%');
+    }
+
+    if (Number(max_participants) >= 50) {
+      warnings.push(
+        `max_participants is set to ${max_participants}. At this scale all players may attempt simultaneously. ` +
+        `Recommended maximum for current infrastructure: 50. ` +
+        `Above 100 concurrent players, consider increasing your Supabase plan.`
+      );
+    }
+
+    if (Number(max_participants) > 100) {
+      warnings.push(
+        `⚠️  CAUTION: max_participants ${max_participants} exceeds the safe limit for the current Supabase free/starter tier. ` +
+        `You risk DB connection exhaustion under simultaneous load. ` +
+        `Upgrade to Supabase Pro before publishing if you intend to run this.`
+      );
     }
 
     const { data, error } = await supabase
@@ -151,6 +170,7 @@ router.post('/', async (req, res) => {
         entry_fee: Number(entry_fee),
         question_count: Number(question_count),
         time_limit_seconds: Number(time_limit_seconds),
+        per_question_time_seconds: per_question_time_seconds !== null ? Number(per_question_time_seconds) : null,
         registration_start: new Date(registration_start).toISOString(),
         tournament_start: new Date(tournament_start).toISOString(),
         tournament_end: new Date(tournament_end).toISOString(),
@@ -173,7 +193,7 @@ router.post('/', async (req, res) => {
     if (error) return res.status(500).json({ success: false, error: 'Failed to create tournament: ' + error.message });
 
     const response = { success: true, data: { tournament: data } };
-    if (warning) response.warning = warning;
+    if (warnings.length > 0) response.warnings = warnings;
 
     return res.status(201).json(response);
   } catch (err) {
@@ -219,12 +239,15 @@ router.put('/:id', async (req, res) => {
 
 /**
  * POST /api/admin/blitz/:id/questions
- * Add a question to tournament
+ * Add a question to tournament.
+ * Body: { question, format, options, correct_answer, order_index, image_url? }
+ *
+ * image_url: a Supabase Storage public URL (upload via POST /api/admin/blitz/:id/questions/upload-image first)
  */
 router.post('/:id/questions', async (req, res) => {
   try {
     const { id } = req.params;
-    const { question, format, options, correct_answer, order_index } = req.body;
+    const { question, format, options, correct_answer, order_index, image_url } = req.body;
 
     if (!question || !format || !correct_answer) {
       return res.status(400).json({ success: false, error: 'question, format, and correct_answer are required' });
@@ -232,6 +255,14 @@ router.post('/:id/questions', async (req, res) => {
 
     if (!['multiple_choice', 'type_answer'].includes(format)) {
       return res.status(400).json({ success: false, error: 'format must be multiple_choice or type_answer' });
+    }
+
+    if (format === 'multiple_choice' && (!options || !Array.isArray(options) || options.length < 2)) {
+      return res.status(400).json({ success: false, error: 'multiple_choice questions require at least 2 options' });
+    }
+
+    if (format === 'multiple_choice' && !options.includes(correct_answer)) {
+      return res.status(400).json({ success: false, error: 'correct_answer must be one of the provided options' });
     }
 
     // Get current question count for auto order_index
@@ -248,6 +279,7 @@ router.post('/:id/questions', async (req, res) => {
         format,
         options: options || null,
         correct_answer,
+        image_url: image_url || null,
         order_index: order_index ?? (count || 0) + 1,
       })
       .select()
@@ -259,6 +291,98 @@ router.post('/:id/questions', async (req, res) => {
   } catch (err) {
     console.error('Add blitz question error:', err);
     return res.status(500).json({ success: false, error: 'Failed to add question' });
+  }
+});
+
+/**
+ * POST /api/admin/blitz/:id/questions/upload-image
+ * Upload an image for a blitz question to Supabase Storage.
+ * Content-Type: multipart/form-data
+ * Field: image (file, max 5MB, jpeg/png/webp/gif)
+ *
+ * Returns: { url: "https://..." } — pass this as image_url when adding the question.
+ */
+router.post('/:id/questions/upload-image', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Verify tournament exists
+    const { data: tournament } = await supabase
+      .from('blitz_tournaments')
+      .select('id, status')
+      .eq('id', id)
+      .single();
+
+    if (!tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
+
+    // Use busboy to parse multipart (already available via express ecosystem)
+    // We handle the raw buffer manually to avoid needing multer as a dependency
+    const chunks = [];
+    let filename = `blitz-${id}-${Date.now()}`;
+    let mimeType = 'image/jpeg';
+    let fieldFound = false;
+
+    await new Promise((resolve, reject) => {
+      const busboy = require('busboy');
+      const bb = busboy({
+        headers: req.headers,
+        limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+      });
+
+      bb.on('file', (fieldname, file, info) => {
+        if (fieldname !== 'image') { file.resume(); return; }
+        fieldFound = true;
+        mimeType = info.mimeType || 'image/jpeg';
+
+        const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
+        filename = `blitz-${id}-${Date.now()}.${ext}`;
+
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+        if (!allowedTypes.includes(mimeType)) {
+          reject(new Error(`Unsupported image type: ${mimeType}. Use jpeg, png, webp, or gif.`));
+          return;
+        }
+
+        file.on('data', (chunk) => chunks.push(chunk));
+        file.on('end', resolve);
+        file.on('error', reject);
+        file.on('limit', () => reject(new Error('Image exceeds 5 MB limit')));
+      });
+
+      bb.on('error', reject);
+      bb.on('finish', () => { if (!fieldFound) reject(new Error('No image field found in request')); });
+      req.pipe(bb);
+    });
+
+    const buffer = Buffer.concat(chunks);
+
+    // Upload to Supabase Storage bucket "blitz-images"
+    const storagePath = `questions/${filename}`;
+    const { error: uploadError } = await supabase.storage
+      .from('blitz-images')
+      .upload(storagePath, buffer, {
+        contentType: mimeType,
+        upsert: false,
+      });
+
+    if (uploadError) {
+      console.error('[blitz upload] Storage error:', uploadError.message);
+      return res.status(500).json({ success: false, error: 'Image upload failed: ' + uploadError.message });
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from('blitz-images')
+      .getPublicUrl(storagePath);
+
+    return res.status(201).json({
+      success: true,
+      data: { url: urlData.publicUrl, path: storagePath },
+    });
+  } catch (err) {
+    console.error('Upload blitz image error:', err);
+    const statusCode = err.message?.includes('Unsupported') || err.message?.includes('5 MB') ? 400 : 500;
+    return res.status(statusCode).json({ success: false, error: err.message || 'Image upload failed' });
   }
 });
 
