@@ -217,58 +217,119 @@ app.post('/api/squad/webhook', express.json(), async (req, res) => {
 
     // Squad deposit event: "charge_successful" (Paystack was "charge.success")
     if (event.Event === 'charge_successful') {
-      // Squad webhook payload structure: fields at top level of event, or in event.Body
-      // The actual webhook data may be in event directly or nested in event.Body
-      const eventData = event.Body || event;
-      const { transaction_ref, amount, transaction_status } = eventData;
+      try {
+        // Squad webhook payload structure: fields at top level of event, or in event.Body
+        // The actual webhook data may be in event directly or nested in event.Body
+        const eventData = event.Body || event;
+        const { transaction_ref, amount, transaction_status } = eventData;
 
-      // Only process confirmed successes
-      if (transaction_status !== 'Success') return res.sendStatus(200);
+        // Validate required fields are present (catches parsing bugs early)
+        if (!transaction_ref) {
+          console.error('[squad webhook] ERROR: Missing transaction_ref in webhook payload');
+          console.error('[squad webhook] Event structure:', JSON.stringify(event, null, 2));
+          await supabase
+            .from('webhook_logs')
+            .update({ status: 'error', error_reason: 'Missing transaction_ref' })
+            .match({ event_type: event.Event, payload: event });
+          return res.status(400).send('Invalid webhook: missing transaction_ref');
+        }
 
-      const amountNaira = Math.floor(amount / 100);
+        if (!amount) {
+          console.error(`[squad webhook] ERROR: Missing amount for ref ${transaction_ref}`);
+          await supabase
+            .from('webhook_logs')
+            .update({ status: 'error', error_reason: 'Missing amount' })
+            .match({ event_type: event.Event, payload: event });
+          return res.status(400).send('Invalid webhook: missing amount');
+        }
 
-      // Squad webhooks don't carry metadata the way Paystack did.
-      // Look up the pending transaction by reference to retrieve player_id.
-      const { data: pendingTxn } = await supabase
-        .from('transactions')
-        .select('player_id')
-        .eq('reference', transaction_ref)
-        .eq('type', 'deposit_pending')
-        .maybeSingle();
+        if (!transaction_status) {
+          console.error(`[squad webhook] ERROR: Missing transaction_status for ref ${transaction_ref}`);
+          await supabase
+            .from('webhook_logs')
+            .update({ status: 'error', error_reason: 'Missing transaction_status' })
+            .match({ event_type: event.Event, payload: event });
+          return res.status(400).send('Invalid webhook: missing transaction_status');
+        }
 
-      const playerId = pendingTxn?.player_id;
-      if (!playerId) return res.sendStatus(200);
+        // Only process confirmed successes
+        if (transaction_status !== 'Success') return res.sendStatus(200);
 
-      // Idempotency: skip if already processed
-      const { data: existing } = await supabase
-        .from('transactions')
-        .select('id')
-        .eq('reference', transaction_ref)
-        .eq('type', 'deposit')
-        .maybeSingle();
+        const amountNaira = Math.floor(amount / 100);
 
-      if (existing) return res.sendStatus(200);
+        // Squad webhooks don't carry metadata the way Paystack did.
+        // Look up the pending transaction by reference to retrieve player_id.
+        const { data: pendingTxn } = await supabase
+          .from('transactions')
+          .select('player_id')
+          .eq('reference', transaction_ref)
+          .eq('type', 'deposit_pending')
+          .maybeSingle();
 
-      // Credit wallet
-      const { data: player } = await supabase
-        .from('players')
-        .select('balance')
-        .eq('id', playerId)
-        .single();
+        const playerId = pendingTxn?.player_id;
+        if (!playerId) {
+          console.warn(`[squad webhook] No pending deposit found for ref ${transaction_ref}`);
+          return res.sendStatus(200);
+        }
 
-      if (player) {
-        await supabase
+        // Idempotency: skip if already processed
+        const { data: existing } = await supabase
+          .from('transactions')
+          .select('id')
+          .eq('reference', transaction_ref)
+          .eq('type', 'deposit')
+          .maybeSingle();
+
+        if (existing) {
+          console.log(`[squad webhook] Already processed ref ${transaction_ref}`);
+          return res.sendStatus(200);
+        }
+
+        // Credit wallet
+        const { data: player } = await supabase
           .from('players')
-          .update({ balance: (player.balance || 0) + amountNaira })
+          .select('balance')
+          .eq('id', playerId)
+          .single();
+
+        if (!player) {
+          console.error(`[squad webhook] Player not found: ${playerId}`);
+          await supabase
+            .from('webhook_logs')
+            .update({ status: 'error', error_reason: 'Player not found' })
+            .match({ event_type: event.Event, payload: event });
+          return res.status(500).send('Player not found');
+        }
+
+        // Update balance
+        const newBalance = (player.balance || 0) + amountNaira;
+        const { error: balanceError } = await supabase
+          .from('players')
+          .update({ balance: newBalance })
           .eq('id', playerId);
 
-        await supabase.from('transactions').insert({
+        if (balanceError) {
+          console.error(`[squad webhook] Balance update failed for ${playerId}:`, balanceError.message);
+          await supabase
+            .from('webhook_logs')
+            .update({ status: 'error', error_reason: `Balance update failed: ${balanceError.message}` })
+            .match({ event_type: event.Event, payload: event });
+          return res.status(500).send('Balance update failed');
+        }
+
+        // Create deposit transaction
+        const { error: txnError } = await supabase.from('transactions').insert({
           player_id: playerId,
           type: 'deposit',
           amount: amountNaira,
           description: `Deposit of ₦${amountNaira} (webhook)`,
           reference: transaction_ref,
         });
+
+        if (txnError) {
+          console.error(`[squad webhook] Transaction insert failed for ${transaction_ref}:`, txnError.message);
+          // Don't fail here — player balance was already credited, this is just audit trail
+        }
 
         // Remove pending record so history shows only the settled deposit
         await supabase
@@ -281,10 +342,21 @@ app.post('/api/squad/webhook', express.json(), async (req, res) => {
         const { checkReferralCompletion } = require('./routes/referrals');
         checkReferralCompletion(playerId, 'deposit', amountNaira).catch(() => {});
 
+        // Mark webhook as successfully processed
         await supabase
           .from('webhook_logs')
           .update({ status: 'processed' })
-          .eq('event_type', event.Event);
+          .match({ event_type: event.Event, payload: event });
+
+        console.log(`[squad webhook] ✓ Processed ${transaction_ref} | ₦${amountNaira} → Player ${playerId}`);
+      } catch (processError) {
+        console.error('[squad webhook] Error processing charge_successful:', processError.message);
+        await supabase
+          .from('webhook_logs')
+          .update({ status: 'error', error_reason: processError.message })
+          .match({ event_type: event.Event, payload: event })
+          .catch(() => {});
+        return res.status(500).send('Processing failed');
       }
     }
 
@@ -292,6 +364,60 @@ app.post('/api/squad/webhook', express.json(), async (req, res) => {
   } catch (err) {
     console.error('Squad webhook error:', err);
     return res.sendStatus(500);
+  }
+});
+
+// ─── Webhook Health Check ─────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/webhook-health
+ * Monitor webhook processing health. Detects unprocessed successful webhooks.
+ * Returns stats on received vs processed webhooks.
+ */
+app.get('/api/admin/webhook-health', async (req, res) => {
+  try {
+    const { data: logs } = await supabase
+      .from('webhook_logs')
+      .select('*')
+      .eq('event_type', 'charge_successful')
+      .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+
+    const stats = {
+      total: logs?.length || 0,
+      processed: logs?.filter(l => l.status === 'processed').length || 0,
+      received: logs?.filter(l => l.status === 'received').length || 0,
+      errors: logs?.filter(l => l.status === 'error').length || 0,
+      last_24h: logs || []
+    };
+
+    // Alert if there are unprocessed successful webhooks
+    const unprocessed = stats.last_24h.filter(l => {
+      const txStatus = l.payload?.Body?.transaction_status;
+      return txStatus === 'Success' && l.status === 'received';
+    });
+
+    if (unprocessed.length > 0) {
+      console.warn(`[webhook-health] ⚠️ Found ${unprocessed.length} unprocessed successful webhooks!`);
+      return res.status(200).json({
+        status: 'WARNING',
+        message: `${unprocessed.length} successful webhooks not processed`,
+        stats,
+        unprocessed_details: unprocessed.map(l => ({
+          reference: l.payload?.Body?.transaction_ref,
+          amount: l.payload?.Body?.amount,
+          received_at: l.created_at
+        }))
+      });
+    }
+
+    res.json({
+      status: 'OK',
+      message: 'All webhooks processed successfully',
+      stats
+    });
+  } catch (err) {
+    console.error('[webhook-health] Error:', err.message);
+    res.status(500).json({ status: 'ERROR', message: err.message });
   }
 });
 
