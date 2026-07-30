@@ -152,7 +152,10 @@ app.use('/api/game/play', gameLimiter);
 app.use('/api/game/submit', gameLimiter);
 app.use('/api/game', gameRoutes);
 // Standard pills (/api/pills) removed — only Specials remain (/api/pills/vip)
+// pillsVip.js now also serves GET /api/pills/vip (lobby) and GET /api/pills/vip/specials
 app.use('/api/pills/vip', gameLimiter, pillsVipRoutes);
+// Legacy path /api/pills/specials still works via the same router
+app.use('/api/pills', gameLimiter, pillsVipRoutes);
 // /api/pills/special removed — pillsSpecial.js was dead code (zero frontend calls)
 // All Specials/VIP gameplay goes through /api/pills/vip via pillsVip.js
 app.use('/api/predictions', gameLimiter, predictionsRoutes);

@@ -21,6 +21,91 @@ const { deductEntryFee } = require('../services/billing');
 
 const router = express.Router();
 
+// ─── LOBBY ────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/pills/vip
+ * GET /api/pills/specials  (legacy path — same response, both stay active)
+ *
+ * Returns all active Special packs for the player-facing Pills lobby.
+ * Specials now own the entire Pills page — no standard packs.
+ *
+ * Each pack includes everything needed to render the challenge phrase:
+ *   entry_fee, prize, question_count, time_limit_minutes, pass_threshold,
+ *   available_question_count (live bank size), user_attempted.
+ */
+async function getSpecialPacks(req, res) {
+  try {
+    const { data: packs, error } = await supabase.rpc('get_active_special_packs');
+    if (error) return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
+
+    const now = new Date();
+    const activePacks = (packs || []).filter((p) => {
+      if (p.quiz_expires_at && new Date(p.quiz_expires_at) <= now) return false;
+      return true;
+    });
+
+    const packIds = activePacks.map((p) => p.id);
+    let availableCountByPack = {};
+    let userAttemptedByPack = {};
+
+    if (packIds.length > 0) {
+      const { data: pillCounts } = await supabase
+        .from('pills')
+        .select('pack_id')
+        .in('pack_id', packIds)
+        .eq('status', 'available');
+
+      for (const row of pillCounts || []) {
+        availableCountByPack[row.pack_id] = (availableCountByPack[row.pack_id] || 0) + 1;
+      }
+
+      const { data: completedAttempts } = await supabase
+        .from('special_attempts')
+        .select('pack_id')
+        .eq('player_id', req.player.id)
+        .in('pack_id', packIds)
+        .in('status', ['passed', 'failed']);
+
+      for (const attempt of completedAttempts || []) {
+        userAttemptedByPack[attempt.pack_id] = true;
+      }
+    }
+
+    const result = activePacks.map((p) => ({
+      id: p.id,
+      name: p.name,
+      category: p.category,
+      status: p.status,
+      is_vip: true,
+      pack_type: p.pack_type || 'special',
+      entry_fee: p.entry_fee ? parseFloat(p.entry_fee) : null,
+      prize: p.prize ? parseFloat(p.prize) : null,
+      prize_amount: p.prize ? parseFloat(p.prize) : null,
+      question_count: p.question_count || null,
+      total_time_seconds: p.total_time_seconds || null,
+      time_limit_minutes: p.total_time_seconds ? Math.ceil(p.total_time_seconds / 60) : null,
+      pass_threshold: p.required_correct || null,
+      required_correct: p.required_correct || null,
+      entry_window_end: p.entry_window_end || null,
+      quiz_expires_at: p.quiz_expires_at || null,
+      max_entries: p.max_entries || null,
+      current_entries: p.current_entries || 0,
+      available_question_count: availableCountByPack[p.id] || 0,
+      user_attempted: !!userAttemptedByPack[p.id],
+    }));
+
+    return res.json({ success: true, data: { specials: result } });
+  } catch (err) {
+    console.error('Get specials error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
+  }
+}
+
+// Both paths serve the same data
+router.get('/', auth, getSpecialPacks);
+router.get('/specials', auth, getSpecialPacks);
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 /**
