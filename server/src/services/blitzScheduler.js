@@ -361,6 +361,29 @@ async function scoreAndCompleteTournament(id, triggeredBy = 'admin') {
   await supabase.from('blitz_tournaments').update({ status: 'completed' }).eq('id', id);
   console.log(`[blitzScheduler] ${id} → completed (${attempts.length} participants, ₦${totalCashPaid} distributed, triggeredBy: ${triggeredBy})`);
 
+  // Persist a scoring audit record so GET /api/admin/blitz/:id/results can report
+  // when scoring ran and whether it was automatic or manual.
+  // Uses entity_type = 'blitz_tournament', action = 'blitz_scored'.
+  await supabase.from('admin_audit_log').insert({
+    admin_id: '00000000-0000-0000-0000-000000000000',
+    admin_email: triggeredBy === 'admin' ? 'admin@bitlyfe.internal' : 'scheduler@bitlyfe.internal',
+    action: 'blitz_scored',
+    entity_type: 'blitz_tournament',
+    entity_id: id,
+    player_id: null,
+    resolution: triggeredBy,
+    notes: `Tournament scored. ${attempts.length} participants. ₦${totalCashPaid} distributed. triggered_by: ${triggeredBy}`,
+    payload: {
+      triggered_by: triggeredBy,
+      total_participants: attempts.length,
+      total_cash_distributed: totalCashPaid,
+      non_cash_prizes_awarded: nonCashAwarded,
+    },
+  }).catch(err => {
+    // Don't fail scoring if audit insert fails — just log it
+    console.error(`[blitzScheduler] audit log insert failed for ${id}:`, err.message);
+  });
+
   return {
     message: 'Tournament scored and prizes distributed',
     total_participants: attempts.length,

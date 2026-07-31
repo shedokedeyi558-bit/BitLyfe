@@ -813,4 +813,245 @@ router.get('/:id/leaderboard', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/blitz/:id/results
+ *
+ * Full post-tournament review for admin. Only available when status = 'completed'.
+ *
+ * Returns:
+ *  - tournament config (prize model, entry_fee, first_place_percent, third_place_discount_percent)
+ *  - Every registered player with:
+ *      rank, score, total_time_ms, submitted (bool), registered_at, entry_fee_paid
+ *  - Real prize outcome per player (from blitz_prizes + blitz_tickets)
+ *  - Revenue audit: total collected, total cash paid out, math check
+ *  - Scoring event: when it ran, triggered_by (scheduler vs admin)
+ *
+ * Real table/column references:
+ *  blitz_registrations: tournament_id, player_id, entry_fee_paid, registered_at, ticket
+ *  blitz_attempts: tournament_id, player_id, score, total_time_ms, completed_at, status
+ *  blitz_prizes: tournament_id, player_id, position, prize_type, amount, ticket_code, distributed_at
+ *  blitz_tickets: ticket_code, status, discount_percent, used_on_tournament_id, awarded_at
+ *  admin_audit_log: entity_id, action='blitz_scored', resolution (triggered_by), created_at
+ *  transactions: player_id, type='blitz_entry', amount (negative = entry fee paid)
+ */
+router.get('/:id/results', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ── 1. Fetch tournament ───────────────────────────────────────────────
+    const { data: tournament, error: tErr } = await supabase
+      .from('blitz_tournaments')
+      .select('id, title, status, entry_fee, max_participants, total_registered, prize_pool, first_place_percent, third_place_discount_percent, total_payout_percent, payout_distribution, cash_winner_count, position_prizes, registration_start, tournament_start, tournament_end')
+      .eq('id', id)
+      .single();
+
+    if (tErr || !tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
+    if (tournament.status !== 'completed') {
+      return res.status(400).json({ success: false, error: `Results only available for completed tournaments (current status: ${tournament.status})` });
+    }
+
+    // ── 2. All registrations (everyone who paid to enter) ─────────────────
+    // blitz_registrations.entry_fee_paid is the actual amount each player paid (0 for free-ticket entries)
+    const { data: registrations } = await supabase
+      .from('blitz_registrations')
+      .select('player_id, entry_fee_paid, registered_at, ticket, players(id, phone, name)')
+      .eq('tournament_id', id)
+      .order('registered_at', { ascending: true });
+
+    // ── 3. All attempts (submitted scores) ────────────────────────────────
+    // blitz_attempts.status: 'completed' = submitted, 'in_progress' = started but not submitted
+    const { data: attempts } = await supabase
+      .from('blitz_attempts')
+      .select('player_id, score, total_time_ms, completed_at, status')
+      .eq('tournament_id', id);
+
+    // Build a fast lookup map: player_id → attempt
+    const attemptByPlayer = {};
+    for (const a of attempts || []) {
+      attemptByPlayer[a.player_id] = a;
+    }
+
+    // ── 4. Ranked ordering (score desc, time asc) for position assignment ─
+    const completedAttempts = (attempts || [])
+      .filter(a => a.status === 'completed')
+      .sort((a, b) => b.score - a.score || a.total_time_ms - b.total_time_ms);
+
+    const rankByPlayer = {};
+    completedAttempts.forEach((a, i) => { rankByPlayer[a.player_id] = i + 1; });
+
+    // ── 5. All prizes issued for this tournament ──────────────────────────
+    // blitz_prizes: position, prize_type ('cash'|'free_ticket'|'discount'), amount, ticket_code, distributed_at
+    const { data: prizes } = await supabase
+      .from('blitz_prizes')
+      .select('player_id, position, prize_type, amount, ticket_code, distributed_at')
+      .eq('tournament_id', id);
+
+    // Build lookup: player_id → prize row
+    const prizeByPlayer = {};
+    for (const p of prizes || []) {
+      prizeByPlayer[p.player_id] = p;
+    }
+
+    // ── 6. Ticket redemption status for any ticket prizes ─────────────────
+    // blitz_tickets: ticket_code (unique), status ('unused'|'used'|'expired'), used_on_tournament_id
+    const ticketCodes = (prizes || [])
+      .filter(p => p.ticket_code)
+      .map(p => p.ticket_code);
+
+    let ticketStatusByCode = {};
+    if (ticketCodes.length > 0) {
+      const { data: tickets } = await supabase
+        .from('blitz_tickets')
+        .select('ticket_code, status, discount_percent, used_on_tournament_id, awarded_at')
+        .in('ticket_code', ticketCodes);
+
+      for (const t of tickets || []) {
+        ticketStatusByCode[t.ticket_code] = t;
+      }
+    }
+
+    // ── 7. Scoring audit event ────────────────────────────────────────────
+    // admin_audit_log: action='blitz_scored', entity_id=tournament_id, resolution=triggered_by
+    const { data: auditRows } = await supabase
+      .from('admin_audit_log')
+      .select('resolution, notes, created_at, payload')
+      .eq('action', 'blitz_scored')
+      .eq('entity_id', id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const scoringEvent = auditRows && auditRows.length > 0 ? {
+      scored_at: auditRows[0].created_at,
+      triggered_by: auditRows[0].resolution, // 'scheduler' | 'admin' | 'player_request'
+      notes: auditRows[0].notes,
+    } : {
+      // Fallback: derive from distributed_at on the earliest prize
+      scored_at: prizes && prizes.length > 0
+        ? prizes.reduce((earliest, p) => p.distributed_at < earliest ? p.distributed_at : earliest, prizes[0].distributed_at)
+        : null,
+      triggered_by: 'unknown — scored before audit logging was added',
+      notes: null,
+    };
+
+    // ── 8. Build per-player result rows ───────────────────────────────────
+    const playerResults = (registrations || []).map(reg => {
+      const attempt = attemptByPlayer[reg.player_id] || null;
+      const prize = prizeByPlayer[reg.player_id] || null;
+      const rank = rankByPlayer[reg.player_id] || null;
+
+      let prizeDetail = null;
+      if (prize) {
+        prizeDetail = {
+          position: prize.position,
+          prize_type: prize.prize_type, // 'cash' | 'free_ticket' | 'discount'
+          amount_credited: prize.amount, // 0 for non-cash
+          ticket_code: prize.ticket_code || null,
+          distributed_at: prize.distributed_at,
+          ticket_status: prize.ticket_code && ticketStatusByCode[prize.ticket_code]
+            ? {
+                status: ticketStatusByCode[prize.ticket_code].status,         // 'unused' | 'used' | 'expired'
+                discount_percent: ticketStatusByCode[prize.ticket_code].discount_percent, // null = free entry
+                used_on_tournament_id: ticketStatusByCode[prize.ticket_code].used_on_tournament_id,
+                awarded_at: ticketStatusByCode[prize.ticket_code].awarded_at,
+              }
+            : null,
+        };
+      }
+
+      return {
+        player_id: reg.player_id,
+        name: reg.players?.name || null,
+        phone: reg.players?.phone || null,
+        registered_at: reg.registered_at,
+        entry_fee_paid: reg.entry_fee_paid,         // 0 if free-ticket entry
+        used_ticket_code: reg.ticket || null,        // blitz_registrations.ticket
+        submitted: attempt ? attempt.status === 'completed' : false,
+        score: attempt ? attempt.score : null,
+        total_time_ms: attempt ? attempt.total_time_ms : null,
+        completed_at: attempt ? attempt.completed_at : null,
+        rank,
+        prize: prizeDetail,
+      };
+    });
+
+    // Sort: ranked submitters first (by rank), then non-submitters
+    playerResults.sort((a, b) => {
+      if (a.rank !== null && b.rank !== null) return a.rank - b.rank;
+      if (a.rank !== null) return -1;
+      if (b.rank !== null) return 1;
+      return 0;
+    });
+
+    // ── 9. Revenue audit ──────────────────────────────────────────────────
+    const totalRevenueClaimed = tournament.total_registered * Number(tournament.entry_fee);
+    const totalRevenueActual = (registrations || []).reduce((sum, r) => sum + Number(r.entry_fee_paid || 0), 0);
+    const totalCashPaid = (prizes || [])
+      .filter(p => p.prize_type === 'cash')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    // Expected 1st place cash (new prize model)
+    let expectedCashPrize = null;
+    let mathCheck = null;
+    if (tournament.first_place_percent != null) {
+      expectedCashPrize = Math.round(totalRevenueActual * Number(tournament.first_place_percent) / 100);
+      mathCheck = {
+        formula: `round(${totalRevenueActual} × ${tournament.first_place_percent}% / 100)`,
+        expected: expectedCashPrize,
+        actual_credited: totalCashPaid,
+        match: expectedCashPrize === totalCashPaid,
+      };
+    } else {
+      // Legacy model: cash pool = totalRevenue × total_payout_percent
+      const legacyCashPool = Math.floor(totalRevenueClaimed * (Number(tournament.total_payout_percent || 80) / 100));
+      mathCheck = {
+        formula: `floor(${totalRevenueClaimed} × ${tournament.total_payout_percent || 80}% / 100)`,
+        expected_pool: legacyCashPool,
+        actual_credited: totalCashPaid,
+        note: 'Legacy model — pool is split across multiple winners per payout_distribution',
+      };
+    }
+
+    const revenueAudit = {
+      entry_fee: Number(tournament.entry_fee),
+      total_registered: tournament.total_registered,
+      total_revenue_claimed: totalRevenueClaimed,         // entry_fee × total_registered (what the DB says)
+      total_revenue_actual: totalRevenueActual,           // sum of entry_fee_paid from blitz_registrations
+      discrepancy: totalRevenueClaimed - totalRevenueActual, // > 0 if some players used free/discount tickets
+      total_cash_paid_out: totalCashPaid,
+      platform_kept: totalRevenueActual - totalCashPaid,
+      math_check: mathCheck,
+    };
+
+    return res.json({
+      success: true,
+      data: {
+        tournament: {
+          id: tournament.id,
+          title: tournament.title,
+          status: tournament.status,
+          prize_model: tournament.first_place_percent != null ? 'fixed' : 'legacy',
+          first_place_percent: tournament.first_place_percent,
+          third_place_discount_percent: tournament.third_place_discount_percent,
+          entry_fee: tournament.entry_fee,
+          max_participants: tournament.max_participants,
+          tournament_start: tournament.tournament_start,
+          tournament_end: tournament.tournament_end,
+        },
+        scoring_event: scoringEvent,
+        revenue_audit: revenueAudit,
+        player_results: playerResults,
+        totals: {
+          registered: (registrations || []).length,
+          submitted: completedAttempts.length,
+          did_not_submit: (registrations || []).length - completedAttempts.length,
+          prizes_issued: (prizes || []).length,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Admin blitz results error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch results' });
+  }
+});
+
 module.exports = router;
