@@ -108,50 +108,51 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, error: 'per_question_time_seconds must be between 3 and 120 seconds' });
     }
 
-    // Validate payout_distribution
-    if (!Array.isArray(payout_distribution)) {
-      return res.status(400).json({ success: false, error: 'payout_distribution must be an array' });
-    }
-
-    if (payout_distribution.length !== cash_winner_count) {
-      return res.status(400).json({
-        success: false,
-        error: `payout_distribution length (${payout_distribution.length}) must match cash_winner_count (${cash_winner_count})`,
-      });
-    }
-
-    const distributionSum = payout_distribution.reduce((a, b) => a + Number(b), 0);
-    if (distributionSum !== 100) {
-      return res.status(400).json({
-        success: false,
-        error: `payout_distribution values must sum to exactly 100 (current sum: ${distributionSum})`,
-      });
-    }
-
-    if (total_payout_percent < 1 || total_payout_percent > 100) {
-      return res.status(400).json({ success: false, error: 'total_payout_percent must be between 1 and 100' });
-    }
-
-    // Validate position_prizes if provided
-    if (position_prizes !== null) {
-      if (!Array.isArray(position_prizes)) {
-        return res.status(400).json({ success: false, error: 'position_prizes must be an array' });
+    // Legacy payout field validation — only run when new prize model is NOT in use
+    if (first_place_percent === null) {
+      if (!Array.isArray(payout_distribution)) {
+        return res.status(400).json({ success: false, error: 'payout_distribution must be an array' });
       }
-      for (const p of position_prizes) {
-        if (!p.position || !p.prize_type) {
-          return res.status(400).json({ success: false, error: 'Each position_prizes entry must have position and prize_type' });
+
+      if (payout_distribution.length !== cash_winner_count) {
+        return res.status(400).json({
+          success: false,
+          error: `payout_distribution length (${payout_distribution.length}) must match cash_winner_count (${cash_winner_count})`,
+        });
+      }
+
+      const distributionSum = payout_distribution.reduce((a, b) => a + Number(b), 0);
+      if (distributionSum !== 100) {
+        return res.status(400).json({
+          success: false,
+          error: `payout_distribution values must sum to exactly 100 (current sum: ${distributionSum})`,
+        });
+      }
+
+      if (total_payout_percent < 1 || total_payout_percent > 100) {
+        return res.status(400).json({ success: false, error: 'total_payout_percent must be between 1 and 100' });
+      }
+
+      if (position_prizes !== null) {
+        if (!Array.isArray(position_prizes)) {
+          return res.status(400).json({ success: false, error: 'position_prizes must be an array' });
         }
-        if (!['free_ticket', 'discount'].includes(p.prize_type)) {
-          return res.status(400).json({ success: false, error: `Invalid prize_type "${p.prize_type}" — must be free_ticket or discount` });
-        }
-        if (p.prize_type === 'discount' && (p.discount_percent === undefined || p.discount_percent <= 0 || p.discount_percent >= 100)) {
-          return res.status(400).json({ success: false, error: 'discount prize_type requires discount_percent between 1 and 99' });
-        }
-        if (p.position <= cash_winner_count) {
-          return res.status(400).json({
-            success: false,
-            error: `position_prizes position ${p.position} overlaps with a cash winner rank (cash_winner_count is ${cash_winner_count})`,
-          });
+        for (const p of position_prizes) {
+          if (!p.position || !p.prize_type) {
+            return res.status(400).json({ success: false, error: 'Each position_prizes entry must have position and prize_type' });
+          }
+          if (!['free_ticket', 'discount'].includes(p.prize_type)) {
+            return res.status(400).json({ success: false, error: `Invalid prize_type "${p.prize_type}" — must be free_ticket or discount` });
+          }
+          if (p.prize_type === 'discount' && (p.discount_percent === undefined || p.discount_percent <= 0 || p.discount_percent >= 100)) {
+            return res.status(400).json({ success: false, error: 'discount prize_type requires discount_percent between 1 and 99' });
+          }
+          if (p.position <= cash_winner_count) {
+            return res.status(400).json({
+              success: false,
+              error: `position_prizes position ${p.position} overlaps with a cash winner rank (cash_winner_count is ${cash_winner_count})`,
+            });
+          }
         }
       }
     }
@@ -994,8 +995,9 @@ router.get('/:id/results', async (req, res) => {
     let mathCheck = null;
     if (tournament.first_place_percent != null) {
       expectedCashPrize = Math.round(totalRevenueActual * Number(tournament.first_place_percent) / 100);
+      const platformKept = totalRevenueActual - totalCashPaid;
       mathCheck = {
-        formula: `round(${totalRevenueActual} × ${tournament.first_place_percent}% / 100)`,
+        formula: `revenue(${tournament.total_registered} × ₦${tournament.entry_fee}) − 1st place cash(${tournament.first_place_percent}% of ₦${totalRevenueActual} = ₦${expectedCashPrize}) − platform = ₦${platformKept}`,
         expected: expectedCashPrize,
         actual_credited: totalCashPaid,
         match: expectedCashPrize === totalCashPaid,
