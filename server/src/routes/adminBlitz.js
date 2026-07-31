@@ -46,16 +46,21 @@ router.get('/', async (req, res) => {
  * Body: {
  *   title, description, entry_fee, question_count, time_limit_seconds,
  *   registration_start, tournament_start, tournament_end,
- *   max_participants         (default 20; warn ≥ 50 — server load advisory)
- *   min_participants         (default 1)
- *   per_question_time_seconds (default 8 — strict per-question countdown)
- *   cash_winner_count        (default 1)
- *   payout_distribution      (array summing to 100, length === cash_winner_count)
- *   total_payout_percent     (default 80 — platform keeps 20%)
- *   ticket_tier_percent      (default 0 — use position_prizes instead)
- *   guaranteed_minimum       (optional integer floor prize in naira)
- *   position_prizes          (optional JSONB array for explicit 2nd/3rd prizes)
+ *   max_participants           (default 20)
+ *   min_participants           (default 1)
+ *   per_question_time_seconds  (default 8)
+ *   first_place_percent        (integer 1-100) — % of actual entry revenue → 1st place cash
+ *   third_place_discount_percent (integer 1-99) — % off next entry for 3rd place ticket
+ *   -- legacy fields still accepted for backward compat --
+ *   cash_winner_count, payout_distribution, total_payout_percent,
+ *   ticket_tier_percent, guaranteed_minimum, position_prizes
  * }
+ *
+ * When first_place_percent is set, the new fixed prize model is used at scoring:
+ *   1st = cash (first_place_percent % of total_registered * entry_fee)
+ *   2nd = free-entry ticket (always)
+ *   3rd = discount ticket (third_place_discount_percent % off next entry)
+ * When first_place_percent is null, legacy payout_distribution/position_prizes apply.
  */
 router.post('/', async (req, res) => {
   try {
@@ -65,6 +70,9 @@ router.post('/', async (req, res) => {
       max_participants = 20,
       min_participants = 1,
       per_question_time_seconds = 8,
+      first_place_percent = null,
+      third_place_discount_percent = null,
+      // legacy fields
       cash_winner_count = 1,
       payout_distribution = [100],
       total_payout_percent = 80,
@@ -79,6 +87,20 @@ router.post('/', async (req, res) => {
         success: false,
         error: 'title, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end are required',
       });
+    }
+
+    // Validate new prize fields
+    if (first_place_percent !== null) {
+      const fpp = Number(first_place_percent);
+      if (isNaN(fpp) || fpp < 1 || fpp > 100) {
+        return res.status(400).json({ success: false, error: 'first_place_percent must be between 1 and 100' });
+      }
+    }
+    if (third_place_discount_percent !== null) {
+      const tdp = Number(third_place_discount_percent);
+      if (isNaN(tdp) || tdp < 1 || tdp > 99) {
+        return res.status(400).json({ success: false, error: 'third_place_discount_percent must be between 1 and 99' });
+      }
     }
 
     // Validate per_question_time_seconds
@@ -177,6 +199,8 @@ router.post('/', async (req, res) => {
         ticket_tier_percent: Number(ticket_tier_percent),
         guaranteed_minimum: guaranteed_minimum ? Number(guaranteed_minimum) : null,
         position_prizes: position_prizes || null,
+        first_place_percent: first_place_percent !== null ? Number(first_place_percent) : null,
+        third_place_discount_percent: third_place_discount_percent !== null ? Number(third_place_discount_percent) : null,
         status: 'draft',
         total_registered: 0,
         prize_pool: 0,

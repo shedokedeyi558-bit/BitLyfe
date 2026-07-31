@@ -224,7 +224,7 @@ router.get('/', auth, async (req, res) => {
 
     const { data: tournaments, error } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes')
+      .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes, first_place_percent, third_place_discount_percent, cash_winner_count, payout_distribution')
       .in('status', ['registration', 'active'])
       .order('tournament_start', { ascending: true });
 
@@ -253,7 +253,7 @@ router.get('/:id', auth, async (req, res) => {
 
     const { data: tournament, error } = await supabase
       .from('blitz_tournaments')
-      .select('id, title, description, entry_fee, question_count, time_limit_seconds, per_question_time_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes')
+      .select('id, title, description, entry_fee, question_count, time_limit_seconds, per_question_time_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes, first_place_percent, third_place_discount_percent, cash_winner_count, payout_distribution')
       .eq('id', id)
       .single();
 
