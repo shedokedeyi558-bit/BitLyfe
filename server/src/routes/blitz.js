@@ -5,6 +5,7 @@ const auth = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { checkReferralCompletion } = require('./referrals');
 const { deductEntryFee } = require('../services/billing');
+const { checkAndAdvanceBlitzStatuses } = require('../services/blitzScheduler');
 
 const router = express.Router();
 
@@ -212,10 +213,15 @@ function shuffleArray(arr) {
 
 /**
  * GET /api/blitz
- * List active and registration-open tournaments
+ * List active and registration-open tournaments.
+ * Also triggers a catch-up status check so any real user traffic
+ * self-heals missed transitions during Render sleep gaps.
  */
 router.get('/', auth, async (req, res) => {
   try {
+    // Fire-and-forget catch-up — never delays response, never throws
+    checkAndAdvanceBlitzStatuses('player_request').catch(() => {});
+
     const { data: tournaments, error } = await supabase
       .from('blitz_tournaments')
       .select('id, title, description, entry_fee, question_count, time_limit_seconds, registration_start, tournament_start, tournament_end, status, total_registered, max_participants, prize_pool, total_payout_percent, position_prizes')
@@ -233,12 +239,17 @@ router.get('/', auth, async (req, res) => {
 
 /**
  * GET /api/blitz/:id
- * Tournament detail + player's registration status
+ * Tournament detail + player's registration status.
+ * Also triggers a catch-up status check so any real user traffic
+ * self-heals missed transitions during Render sleep gaps.
  */
 router.get('/:id', auth, async (req, res) => {
   try {
     const { id } = req.params;
     const playerId = req.player.id;
+
+    // Fire-and-forget catch-up — never delays response, never throws
+    checkAndAdvanceBlitzStatuses('player_request').catch(() => {});
 
     const { data: tournament, error } = await supabase
       .from('blitz_tournaments')

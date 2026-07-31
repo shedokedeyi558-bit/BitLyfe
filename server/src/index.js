@@ -24,6 +24,7 @@ const pillsVipRoutes = require('./routes/pillsVip');
 // pillsSpecialRoutes removed — /api/pills/special/* was dead code, superseded by pillsVip.js (/api/pills/vip/*)
 const adminSpecialsBankRoutes = require('./routes/adminSpecialsBank');
 const supabase = require('./db/supabase');
+const { checkAndAdvanceBlitzStatuses } = require('./services/blitzScheduler');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -455,6 +456,17 @@ app.use(async (err, req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`BitLyfe backend running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+
+  // ── Blitz auto-scheduler ──────────────────────────────────────────────────
+  // Run immediately on startup to catch up any missed windows during downtime,
+  // then every 90 seconds while the process is alive.
+  // On Render free tier (kept awake by external ping every ~5 min), this means
+  // a tournament will advance within ~90s of its scheduled time when the server
+  // is awake, or within one ping cycle after a sleep gap.
+  checkAndAdvanceBlitzStatuses('scheduler').catch(() => {});
+  setInterval(() => {
+    checkAndAdvanceBlitzStatuses('scheduler').catch(() => {});
+  }, 90 * 1000); // 90 seconds
 });
 
 module.exports = app;
