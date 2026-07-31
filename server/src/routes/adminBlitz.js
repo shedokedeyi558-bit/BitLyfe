@@ -204,7 +204,13 @@ router.post('/', async (req, res) => {
 
 /**
  * GET /api/admin/blitz/:id
- * Single tournament detail — full config + all questions
+ * Single tournament detail — full config + current registered player count + all questions
+ * 
+ * Returns:
+ * - tournament: all fields including entry_fee, question_count, max_players, prize_pool/payout_split,
+ *   registration_deadline, title, status
+ * - current_registered_count: real-time count from blitz_registrations table
+ * - questions: all questions for this tournament
  */
 router.get('/:id', async (req, res) => {
   try {
@@ -220,6 +226,17 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Tournament not found' });
     }
 
+    // Get real-time registered player count
+    const { count: registeredCount, error: countErr } = await supabase
+      .from('blitz_registrations')
+      .select('id', { count: 'exact', head: true })
+      .eq('tournament_id', id);
+
+    if (countErr) {
+      console.error('Error fetching registration count:', countErr);
+      return res.status(500).json({ success: false, error: 'Failed to fetch registration count' });
+    }
+
     // Fetch all questions for this tournament
     const { data: questions } = await supabase
       .from('blitz_questions')
@@ -230,7 +247,31 @@ router.get('/:id', async (req, res) => {
     return res.json({
       success: true,
       data: {
-        tournament,
+        tournament: {
+          id: tournament.id,
+          title: tournament.title,
+          description: tournament.description,
+          status: tournament.status,
+          entry_fee: tournament.entry_fee,
+          question_count: tournament.question_count,
+          time_limit_seconds: tournament.time_limit_seconds,
+          per_question_time_seconds: tournament.per_question_time_seconds,
+          registration_start: tournament.registration_start,
+          tournament_start: tournament.tournament_start,
+          tournament_end: tournament.tournament_end,
+          max_participants: tournament.max_participants,
+          min_participants: tournament.min_participants,
+          prize_pool: tournament.prize_pool,
+          cash_winner_count: tournament.cash_winner_count,
+          payout_distribution: tournament.payout_distribution,
+          total_payout_percent: tournament.total_payout_percent,
+          ticket_tier_percent: tournament.ticket_tier_percent,
+          guaranteed_minimum: tournament.guaranteed_minimum,
+          position_prizes: tournament.position_prizes,
+          created_by: tournament.created_by,
+          created_at: tournament.created_at,
+        },
+        current_registered_count: registeredCount || 0,
         questions: questions || [],
       },
     });
@@ -269,6 +310,169 @@ router.put('/:id', async (req, res) => {
     return res.json({ success: true, data: { tournament: data } });
   } catch (err) {
     console.error('Update blitz error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update tournament' });
+  }
+});
+
+/**
+ * PATCH /api/admin/blitz/:id
+ * Edit tournament with strict lock rules.
+ * 
+ * Allowed fields: entry_fee, question_count, max_participants, registration_start
+ * 
+ * Lock rule:
+ *   - If registered_count > 0: Reject entire request ("Cannot edit — N players already registered")
+ *   - If registered_count === 0: Apply update normally
+ *   - NEVER allow editing prize_pool or title, regardless of registration count
+ * 
+ * All edits are logged with audit trail.
+ * Lock is all-or-nothing (no partial edits).
+ */
+router.patch('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.admin?.id || null;
+
+    // Fetch current tournament
+    const { data: tournament, error: fetchErr } = await supabase
+      .from('blitz_tournaments')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !tournament) {
+      return res.status(404).json({ success: false, error: 'Tournament not found' });
+    }
+
+    // Get real registered player count from blitz_registrations
+    const { count: registeredCount, error: countErr } = await supabase
+      .from('blitz_registrations')
+      .select('id', { count: 'exact', head: true })
+      .eq('tournament_id', id);
+
+    if (countErr) {
+      console.error('Error checking registration count:', countErr);
+      return res.status(500).json({ success: false, error: 'Failed to check registration count' });
+    }
+
+    const realRegisteredCount = registeredCount || 0;
+
+    // Check lock condition: if players registered, reject all updates
+    if (realRegisteredCount > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `Cannot edit — ${realRegisteredCount} ${realRegisteredCount === 1 ? 'player has' : 'players have'} already registered`,
+      });
+    }
+
+    // Extract allowed fields only (whitelist)
+    const allowedFields = ['entry_fee', 'question_count', 'max_participants', 'registration_start'];
+    const updates = {};
+    let hasAllowedUpdates = false;
+
+    for (const field of allowedFields) {
+      if (field in req.body) {
+        updates[field] = req.body[field];
+        hasAllowedUpdates = true;
+      }
+    }
+
+    // Explicitly reject prize_pool and title if user tries to update them
+    if ('prize_pool' in req.body || 'title' in req.body) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot edit prize_pool or title through this endpoint. These fields are protected.',
+      });
+    }
+
+    if (!hasAllowedUpdates) {
+      return res.status(400).json({
+        success: false,
+        error: 'No allowed fields to update. Allowed fields: entry_fee, question_count, max_participants, registration_start',
+      });
+    }
+
+    // Validate individual field constraints before applying
+    if ('entry_fee' in updates && updates.entry_fee !== null) {
+      const entryFee = Number(updates.entry_fee);
+      if (isNaN(entryFee) || entryFee < 0) {
+        return res.status(400).json({ success: false, error: 'entry_fee must be a non-negative number' });
+      }
+    }
+
+    if ('question_count' in updates && updates.question_count !== null) {
+      const qCount = Number(updates.question_count);
+      if (isNaN(qCount) || qCount < 1 || qCount > 100) {
+        return res.status(400).json({ success: false, error: 'question_count must be between 1 and 100' });
+      }
+    }
+
+    if ('max_participants' in updates && updates.max_participants !== null) {
+      const maxParts = Number(updates.max_participants);
+      if (isNaN(maxParts) || maxParts < 1 || maxParts > 10000) {
+        return res.status(400).json({ success: false, error: 'max_participants must be between 1 and 10000' });
+      }
+    }
+
+    // Apply all updates at once (all-or-nothing)
+    const { data: updatedTournament, error: updateErr } = await supabase
+      .from('blitz_tournaments')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr || !updatedTournament) {
+      console.error('Tournament update error:', updateErr);
+      return res.status(500).json({ success: false, error: 'Failed to update tournament' });
+    }
+
+    // Log audit trail for each changed field
+    const now = new Date().toISOString();
+    const auditEntries = [];
+
+    for (const field of allowedFields) {
+      if (field in updates && tournament[field] !== updates[field]) {
+        auditEntries.push({
+          admin_id: adminId,
+          action: 'blitz_tournament_edit',
+          object_id: id,
+          object_type: 'blitz_tournament',
+          details: {
+            field,
+            old_value: tournament[field],
+            new_value: updates[field],
+            tournament_title: tournament.title,
+            registered_count_at_edit: realRegisteredCount,
+          },
+          created_at: now,
+        });
+      }
+    }
+
+    if (auditEntries.length > 0) {
+      const { error: auditErr } = await supabase
+        .from('admin_audit_log')
+        .insert(auditEntries);
+
+      if (auditErr) {
+        console.error('Audit log insertion error:', auditErr);
+        // Still return success — audit failure should not block the update
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        tournament: updatedTournament,
+        audit: {
+          changes_count: auditEntries.length,
+          registered_players_at_edit: realRegisteredCount,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('Patch blitz error:', err);
     return res.status(500).json({ success: false, error: 'Failed to update tournament' });
   }
 });
