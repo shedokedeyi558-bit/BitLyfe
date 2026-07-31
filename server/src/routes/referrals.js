@@ -50,7 +50,6 @@ async function checkReferralCompletion(refereeId, actionType, depositAmount = 0)
 
   // Apply the flag update
   const updatedDepositDone   = updates.first_deposit_done   ?? referral.first_deposit_done;
-  const updatedGameDone      = updates.first_game_done      ?? referral.first_game_done;
   const updatedDepositAmount = updates.first_deposit_amount ?? referral.first_deposit_amount;
 
   await supabase
@@ -58,8 +57,8 @@ async function checkReferralCompletion(refereeId, actionType, depositAmount = 0)
     .update(updates)
     .eq('id', referral.id);
 
-  // Both conditions met → complete the referral
-  if (updatedDepositDone && updatedGameDone) {
+  // Completion condition: first deposit only (game no longer required)
+  if (updatedDepositDone) {
     await supabase
       .from('referrals')
       .update({ status: 'completed', completed_at: new Date().toISOString() })
