@@ -117,28 +117,63 @@ async function verifyTransaction(reference) {
 
 /**
  * Fetch list of supported Nigerian banks.
- * Replaces paystack.getBankList().
- * Returns { status, data: [{ name, code, type }] }
+ *
+ * SquadCo does NOT have a dynamic bank-list API endpoint.
+ * Their Transfer API docs (https://squadinc.gitbook.io/squad-api-documentation/transfer-api)
+ * publish a static bank code table. We return that list directly.
+ * Bank codes are in NIP format (e.g. "000013" for GTBank, not Paystack's "058").
  */
 async function getBankList() {
-  let response;
-  try {
-    response = await axios.get(`${BASE_URL}/payout/banks`, { headers: getHeaders() });
-  } catch (axiosErr) {
-    console.error('[squad] getBankList error:', axiosErr.message);
-    if (axiosErr.response) console.error('[squad] body:', JSON.stringify(axiosErr.response.data));
-    throw axiosErr;
-  }
-
-  const d = response.data;
+  // Static list from SquadCo Transfer API documentation.
+  // Source: https://squadinc.gitbook.io/squad-api-documentation/transfer-api
+  const banks = [
+    { name: 'Access Bank', code: '000014' },
+    { name: 'Citibank', code: '000009' },
+    { name: 'Diamond Bank', code: '000005' },
+    { name: 'Ecobank', code: '000010' },
+    { name: 'FCMB', code: '000003' },
+    { name: 'Fidelity Bank', code: '000007' },
+    { name: 'First Bank of Nigeria', code: '000016' },
+    { name: 'GTBank', code: '000013' },
+    { name: 'Heritage Bank', code: '000020' },
+    { name: 'Jaiz Bank', code: '000006' },
+    { name: 'Keystone Bank', code: '000002' },
+    { name: 'Kuda Bank (MFB)', code: '090267' },
+    { name: 'Moniepoint (Rolez MFB)', code: '090405' },
+    { name: 'OPay (Opay Digital Services)', code: '100004' },
+    { name: 'PalmPay', code: '100033' },
+    { name: 'Polaris Bank', code: '000008' },
+    { name: 'Providus Bank', code: '000023' },
+    { name: 'Stanbic IBTC Bank', code: '000012' },
+    { name: 'Standard Chartered', code: '000021' },
+    { name: 'Sterling Bank', code: '000001' },
+    { name: 'Suntrust Bank', code: '000022' },
+    { name: 'Titan Trust Bank', code: '000025' },
+    { name: 'UBA (United Bank for Africa)', code: '000004' },
+    { name: 'Union Bank', code: '000018' },
+    { name: 'Unity Bank', code: '000011' },
+    { name: 'Wema Bank', code: '000017' },
+    { name: 'Zenith Bank', code: '000015' },
+    { name: 'Taj Bank', code: '000026' },
+    { name: 'Globus Bank', code: '000027' },
+    { name: 'Lotus Bank', code: '000029' },
+    { name: 'Premium Trust Bank', code: '000031' },
+    { name: 'Optimus Bank', code: '000036' },
+    { name: 'Sparkle MFB', code: '090325' },
+    { name: 'VFD MFB', code: '090110' },
+    { name: 'FairMoney MFB', code: '090551' },
+    { name: 'Safe Haven MFB', code: '090286' },
+    { name: 'RenMoney MFB', code: '090198' },
+    { name: 'Eyowo', code: '090328' },
+    { name: '9PSB (9Payment Service Bank)', code: '120001' },
+    { name: 'HopePSB', code: '120002' },
+    { name: 'MoMo PSB (MTN)', code: '120003' },
+    { name: 'Coronation Merchant Bank', code: '060001' },
+  ];
 
   return {
-    status: d.status === 200 || d.success === true,
-    data: (d.data || []).map((b) => ({
-      name: b.bank_name,
-      code: b.bank_code,
-      type: 'nuban',
-    })),
+    status: true,
+    data: banks.map((b) => ({ name: b.name, code: b.code, type: 'nuban' })),
   };
 }
 
@@ -189,20 +224,38 @@ async function createTransferRecipient({ name, accountNumber, bankCode }) {
  * Initiate a payout (withdrawal transfer).
  * Replaces paystack.initiateTransfer().
  * recipientCode is the JSON string from createTransferRecipient above.
+ *
+ * SquadCo Transfer API docs:
+ *   POST /payout/transfer  (NOT /payout/initiate)
+ *   transaction_reference MUST be prefixed with merchant ID (from SQUADCO_MERCHANT_ID env var)
+ *   account_name is required
+ * Source: https://squadinc.gitbook.io/squad-api-documentation/transfer-api
  */
 async function initiateTransfer({ amountKobo, recipientCode, reference, reason }) {
   const { accountNumber, bankCode, name } = JSON.parse(recipientCode);
 
+  // SquadCo requires transaction_reference to be prefixed with merchant ID
+  // e.g. "2DEGLX1A_wdl_uuid" — without this the transfer is rejected
+  const merchantId = process.env.SQUADCO_MERCHANT_ID || '';
+  const transactionReference = merchantId
+    ? `${merchantId}_${reference}`
+    : reference;
+
+  if (!merchantId) {
+    console.warn('[squad] initiateTransfer: SQUADCO_MERCHANT_ID env var not set — transaction_reference will not be prefixed. SquadCo may reject this transfer.');
+  }
+
   let response;
   try {
     response = await axios.post(
-      `${BASE_URL}/payout/initiate`,
+      `${BASE_URL}/payout/transfer`,   // ← correct path per SquadCo docs
       {
         account_number: accountNumber,
         bank_code: bankCode,
+        account_name: name || '',       // ← required by SquadCo
         currency_id: 'NGN',
-        amount: amountKobo,
-        transaction_reference: reference,
+        amount: String(amountKobo),     // ← SquadCo sample shows string amount
+        transaction_reference: transactionReference,
         remark: reason,
       },
       { headers: getHeaders() }
@@ -219,7 +272,7 @@ async function initiateTransfer({ amountKobo, recipientCode, reference, reason }
     status: d.status === 200 || d.success === true,
     message: d.message,
     data: {
-      transfer_code: d.data?.transaction_reference || reference,
+      transfer_code: d.data?.transaction_reference || transactionReference,
     },
   };
 }
