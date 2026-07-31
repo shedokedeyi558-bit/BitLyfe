@@ -203,6 +203,44 @@ router.post('/', async (req, res) => {
 });
 
 /**
+ * GET /api/admin/blitz/:id
+ * Single tournament detail — full config + all questions
+ */
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: tournament, error: tErr } = await supabase
+      .from('blitz_tournaments')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (tErr || !tournament) {
+      return res.status(404).json({ success: false, error: 'Tournament not found' });
+    }
+
+    // Fetch all questions for this tournament
+    const { data: questions } = await supabase
+      .from('blitz_questions')
+      .select('id, question, format, options, correct_answer, image_url, order_index, created_at')
+      .eq('tournament_id', id)
+      .order('order_index', { ascending: true });
+
+    return res.json({
+      success: true,
+      data: {
+        tournament,
+        questions: questions || [],
+      },
+    });
+  } catch (err) {
+    console.error('Admin get blitz detail error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch tournament' });
+  }
+});
+
+/**
  * PUT /api/admin/blitz/:id
  * Update tournament (only if draft)
  */
