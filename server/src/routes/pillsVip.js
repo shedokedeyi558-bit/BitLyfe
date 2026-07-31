@@ -95,7 +95,7 @@ async function getSpecialPacks(req, res) {
       user_attempted: !!userAttemptedByPack[p.id],
     }));
 
-    return res.json({ success: true, data: { specials: result } });
+    return res.json({ success: true, data: { packs: result, specials: result } });
   } catch (err) {
     console.error('Get specials error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch packs' });
