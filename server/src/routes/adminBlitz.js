@@ -503,32 +503,20 @@ router.patch('/:id', async (req, res) => {
 // ─── QUESTION MANAGEMENT ──────────────────────────────────────────────────────
 
 /**
- * POST /api/admin/blitz/:id/questions/upload-image
- * Upload an image for a blitz question to Supabase Storage.
- * MUST be registered BEFORE /:id/questions to avoid Express matching
- * "upload-image" as a question body on the generic POST /:id/questions route.
- * Content-Type: multipart/form-data
- * Field: image (file, max 5MB, jpeg/png/webp/gif)
+ * Shared image upload handler — used by both:
+ *   POST /api/admin/blitz/temp/questions/upload-image  (pre-creation, no tournament yet)
+ *   POST /api/admin/blitz/:id/questions/upload-image   (existing tournament)
  *
- * Returns: { url: "https://..." } — pass this as image_url when adding the question.
+ * Accepts multipart/form-data.
+ * Field name: 'file' (frontend) OR 'image' (legacy) — both accepted.
+ * Max size: 5 MB. Allowed types: jpeg, png, webp, gif.
+ * Uploads to Supabase Storage bucket 'blitz-images'.
+ * Returns: { success: true, data: { url, path } }
  */
-router.post('/:id/questions/upload-image', async (req, res) => {
+async function handleBlitzImageUpload(req, res, contextId) {
   try {
-    const { id } = req.params;
-
-    // Verify tournament exists
-    const { data: tournament } = await supabase
-      .from('blitz_tournaments')
-      .select('id, status')
-      .eq('id', id)
-      .single();
-
-    if (!tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
-
-    // Use busboy to parse multipart (already available via express ecosystem)
-    // We handle the raw buffer manually to avoid needing multer as a dependency
     const chunks = [];
-    let filename = `blitz-${id}-${Date.now()}`;
+    let filename = `blitz-${contextId}-${Date.now()}`;
     let mimeType = 'image/jpeg';
     let fieldFound = false;
 
@@ -540,12 +528,13 @@ router.post('/:id/questions/upload-image', async (req, res) => {
       });
 
       bb.on('file', (fieldname, file, info) => {
-        if (fieldname !== 'image') { file.resume(); return; }
+        // Accept 'file' (frontend default) or 'image' (legacy)
+        if (fieldname !== 'file' && fieldname !== 'image') { file.resume(); return; }
         fieldFound = true;
         mimeType = info.mimeType || 'image/jpeg';
 
         const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
-        filename = `blitz-${id}-${Date.now()}.${ext}`;
+        filename = `blitz-${contextId}-${Date.now()}.${ext}`;
 
         const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
         if (!allowedTypes.includes(mimeType)) {
@@ -560,13 +549,12 @@ router.post('/:id/questions/upload-image', async (req, res) => {
       });
 
       bb.on('error', reject);
-      bb.on('finish', () => { if (!fieldFound) reject(new Error('No image field found in request')); });
+      bb.on('finish', () => { if (!fieldFound) reject(new Error('No image field found in request (expected field name: file)')); });
       req.pipe(bb);
     });
 
     const buffer = Buffer.concat(chunks);
 
-    // Upload to Supabase Storage bucket "blitz-images"
     const storagePath = `questions/${filename}`;
     const { error: uploadError } = await supabase.storage
       .from('blitz-images')
@@ -580,7 +568,6 @@ router.post('/:id/questions/upload-image', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Image upload failed: ' + uploadError.message });
     }
 
-    // Get public URL
     const { data: urlData } = supabase.storage
       .from('blitz-images')
       .getPublicUrl(storagePath);
@@ -594,6 +581,42 @@ router.post('/:id/questions/upload-image', async (req, res) => {
     const statusCode = err.message?.includes('Unsupported') || err.message?.includes('5 MB') ? 400 : 500;
     return res.status(statusCode).json({ success: false, error: err.message || 'Image upload failed' });
   }
+}
+
+/**
+ * POST /api/admin/blitz/temp/questions/upload-image
+ * Temp upload for Blitz create flow — no tournament ID required.
+ * MUST be registered before /:id/questions/upload-image so Express
+ * does not try to match 'temp' as a tournament UUID.
+ * Field name: file (or image). Returns { data: { url, path } }.
+ */
+router.post('/temp/questions/upload-image', async (req, res) => {
+  return handleBlitzImageUpload(req, res, `temp-${Date.now()}`);
+});
+
+/**
+ * POST /api/admin/blitz/:id/questions/upload-image
+ * Upload an image for a blitz question to Supabase Storage.
+ * MUST be registered BEFORE /:id/questions to avoid Express matching
+ * "upload-image" as a question body on the generic POST /:id/questions route.
+ * Content-Type: multipart/form-data
+ * Field: file or image (file, max 5MB, jpeg/png/webp/gif)
+ *
+ * Returns: { url: "https://..." } — pass this as image_url when adding the question.
+ */
+router.post('/:id/questions/upload-image', async (req, res) => {
+  const { id } = req.params;
+
+  // Verify tournament exists (skip for 'temp' — handled by the route above)
+  const { data: tournament } = await supabase
+    .from('blitz_tournaments')
+    .select('id')
+    .eq('id', id)
+    .single();
+
+  if (!tournament) return res.status(404).json({ success: false, error: 'Tournament not found' });
+
+  return handleBlitzImageUpload(req, res, id);
 });
 
 /**
