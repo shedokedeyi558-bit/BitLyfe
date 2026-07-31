@@ -976,10 +976,16 @@ router.get('/:id/results', async (req, res) => {
           distributed_at: prize.distributed_at,
           ticket_status: prize.ticket_code && ticketStatusByCode[prize.ticket_code]
             ? {
-                status: ticketStatusByCode[prize.ticket_code].status,         // 'unused' | 'used' | 'expired'
-                discount_percent: ticketStatusByCode[prize.ticket_code].discount_percent, // null = free entry
+                // Compute live: if stored status is 'used' keep it; otherwise check expires_at
+                status: ticketStatusByCode[prize.ticket_code].status === 'used'
+                  ? 'used'
+                  : new Date(ticketStatusByCode[prize.ticket_code].expires_at) < new Date()
+                  ? 'expired'
+                  : 'unused',
+                discount_percent: ticketStatusByCode[prize.ticket_code].discount_percent,
                 used_on_tournament_id: ticketStatusByCode[prize.ticket_code].used_on_tournament_id,
                 awarded_at: ticketStatusByCode[prize.ticket_code].awarded_at,
+                expires_at: ticketStatusByCode[prize.ticket_code].expires_at,
               }
             : null,
         };

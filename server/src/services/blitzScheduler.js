@@ -141,9 +141,9 @@ async function scoreAndCompleteTournament(id, triggeredBy = 'admin') {
 
       if (!existing) {
         const ticketCode = generateTicketCode();
-        // No expiry — redeemable on first future Blitz the player registers for
+        // 7-day expiry — must be used within a week of winning
         const expiresAt = new Date();
-        expiresAt.setFullYear(expiresAt.getFullYear() + 2); // 2 years as practical no-expiry
+        expiresAt.setDate(expiresAt.getDate() + 7);
 
         await supabase.from('blitz_tickets').insert({
           player_id: attempt.player_id,
@@ -180,8 +180,9 @@ async function scoreAndCompleteTournament(id, triggeredBy = 'admin') {
 
       if (!existing) {
         const ticketCode = generateTicketCode();
+        // 7-day expiry — must be used within a week of winning
         const expiresAt = new Date();
-        expiresAt.setFullYear(expiresAt.getFullYear() + 2);
+        expiresAt.setDate(expiresAt.getDate() + 7);
 
         await supabase.from('blitz_tickets').insert({
           player_id: attempt.player_id,
