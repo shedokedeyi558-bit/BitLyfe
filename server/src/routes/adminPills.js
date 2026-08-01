@@ -259,7 +259,7 @@ router.get('/packs', async (req, res) => {
 /**
  * POST /api/admin/pills/packs
  * Create a new pill pack
- * Body: { name, category, status?, entry_fee?, prize?, quiz_expires_at?, max_entries? }
+ * Body: { name, category, status?, entry_fee?, prize?, quiz_expires_at? }
  * entry_fee and prize are pack-level — all pills in this pack share these values.
  *
  * quiz_expires_at: optional ISO timestamp (or duration expressed as hours, e.g.
@@ -267,10 +267,7 @@ router.get('/packs', async (req, res) => {
  *   Once this time passes, no new player entries are accepted server-side.
  *   Independent of entry_window_end — do NOT confuse the two.
  *
- * max_entries (Specials-only, nullable):
- *   If set, closes the pack once current_entries >= max_entries.
- *   Independent of quiz_expires_at — whichever limit hits first closes the pack.
- *   Examples: 50 rounds, 100 entries, etc.
+ * max_entries is always 1 (single-claim). Client-sent value is ignored.
  */
 router.post('/packs', async (req, res) => {
   try {
@@ -341,8 +338,8 @@ router.post('/packs', async (req, res) => {
       p_quiz_expires_at:    quiz_expires_at ? new Date(quiz_expires_at).toISOString() : null,
       p_target_bank_size:   isSpecial && target_bank_size !== undefined && target_bank_size !== null
                               ? Number(target_bank_size) : null,
-      p_max_entries:        isSpecial && max_entries !== undefined && max_entries !== null
-                              ? Number(max_entries) : null,
+      // max_entries is always 1 — every pack is single-claim only. Ignore any client-sent value.
+      p_max_entries:        1,
     });
 
     if (error) {
@@ -358,17 +355,14 @@ router.post('/packs', async (req, res) => {
 });
 
 /**
-/**
  * PUT /api/admin/pills/packs/:packId
- * Update a pack's name, category, status, entry_fee, prize, quiz_expires_at, or max_entries.
- * Body: { name?, category?, status?, entry_fee?, prize?, quiz_expires_at?, max_entries? }
+ * Update a pack's name, category, status, entry_fee, prize, quiz_expires_at.
+ * Body: { name?, category?, status?, entry_fee?, prize?, quiz_expires_at? }
  *
  * quiz_expires_at: set to null to clear, or an ISO timestamp to set/update.
  *   This is the Pills/Specials-only expiry — completely independent of entry_window_end.
  *
- * max_entries (Specials-only): set to null to remove cap, or a positive integer.
- *   When set, closes pack once current_entries >= max_entries.
- *   Independent of quiz_expires_at — whichever limit hits first closes pack.
+ * max_entries is locked at 1 and cannot be changed post-creation. Silently ignored if sent.
  */
 router.put('/packs/:packId', async (req, res) => {
   try {
@@ -401,8 +395,7 @@ router.put('/packs/:packId', async (req, res) => {
     if (quiz_expires_at !== undefined) updates.quiz_expires_at = quiz_expires_at === null ? null : new Date(quiz_expires_at).toISOString();
     // target_bank_size: Specials-only informational target (nullable integer)
     if (target_bank_size !== undefined) updates.target_bank_size = target_bank_size === null ? null : Number(target_bank_size);
-    // max_entries: Specials-only entry cap (nullable integer, independent of quiz_expires_at)
-    if (max_entries !== undefined) updates.max_entries = max_entries === null ? null : Number(max_entries);
+    // max_entries is locked at 1 post-creation — not updatable. Silently ignore if sent.
     if (status !== undefined) {
       if (!['active', 'inactive', 'draft'].includes(status)) {
         return res.status(400).json({ success: false, error: 'status must be active, inactive, or draft' });
