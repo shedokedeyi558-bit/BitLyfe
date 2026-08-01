@@ -95,6 +95,25 @@ router.get('/packs', async (req, res) => {
           }
         }
 
+        // Fetch prize transactions for passed attempts in one batch
+        // type='specials_win' is inserted by creditSpecialsPrize() in pillsVip.js
+        const passedPlayerIds = attempts.filter(a => a.status === 'passed').map(a => a.player_id);
+        const prizePaidByPlayer = {};
+        if (passedPlayerIds.length > 0) {
+          const { data: prizeTxns } = await supabase
+            .from('transactions')
+            .select('player_id, amount')
+            .eq('type', 'specials_win')
+            .in('player_id', passedPlayerIds)
+            .order('created_at', { ascending: false });
+          // Keep first (most recent) per player — in case of retries
+          for (const txn of prizeTxns || []) {
+            if (!prizePaidByPlayer[txn.player_id]) {
+              prizePaidByPlayer[txn.player_id] = txn.amount;
+            }
+          }
+        }
+
         for (const a of attempts) {
           const playerInfo = playerPhones[a.player_id] || {};
           attemptsByPack[a.pack_id] = {
@@ -107,6 +126,7 @@ router.get('/packs', async (req, res) => {
             started_at: a.started_at,
             completed_at: a.completed_at || null,
             total_time_seconds: a.total_time_seconds,
+            prize_paid: a.status === 'passed' ? (prizePaidByPlayer[a.player_id] || null) : null,
           };
         }
       }
@@ -177,18 +197,15 @@ router.get('/packs', async (req, res) => {
           ? Math.round(pack.total_time_seconds / 60)
           : null,
         // ── Claim / attempt data (Specials one-player model) ───────────────
-        // claim_status: derived from special_attempts row for this pack
-        //   'available'            — no attempt exists, pack is open
-        //   'claimed_not_played'   — attempt in_progress, timer still running
-        //   'won'                  — attempt status = 'passed'
-        //   'lost'                 — attempt status = 'failed'
-        // claimer_*: only set when claim_status !== 'available'
-        // score: correct_count / total_questions — only set when won or lost
-        // time_remaining_seconds: only set when claimed_not_played
         ...(() => {
           const attempt = attemptsByPack[pack.id];
           if (!attempt) {
-            return { claim_status: 'available', claimer_phone: null, claimer_name: null, claimer_player_id: null, score: null, completed_at: null, time_remaining_seconds: null };
+            return {
+              claim_status: 'available',
+              claimer_phone: null, claimer_name: null, claimer_player_id: null,
+              score: null, completed_at: null, time_remaining_seconds: null,
+              latest_attempt: null,
+            };
           }
           const now = new Date();
           const elapsedSecs = Math.floor((now - new Date(attempt.started_at)) / 1000);
@@ -197,16 +214,27 @@ router.get('/packs', async (req, res) => {
             attempt.attempt_status === 'passed' ? 'won' :
             attempt.attempt_status === 'failed' ? 'lost' :
             'claimed_not_played';
+          const scoreObj = (attempt.attempt_status === 'passed' || attempt.attempt_status === 'failed')
+            ? { correct: attempt.correct_count, total: attempt.total_questions }
+            : null;
           return {
             claim_status: claimStatus,
             claimer_phone: attempt.player_phone,
             claimer_name: attempt.player_name,
             claimer_player_id: attempt.player_id,
-            score: (attempt.attempt_status === 'passed' || attempt.attempt_status === 'failed')
-              ? { correct: attempt.correct_count, total: attempt.total_questions }
-              : null,
+            score: scoreObj,
             completed_at: attempt.completed_at || null,
             time_remaining_seconds: claimStatus === 'claimed_not_played' ? remaining : null,
+            // latest_attempt: flat object for the admin card outcome line
+            latest_attempt: {
+              player_phone: attempt.player_phone,
+              passed: attempt.attempt_status === 'passed',
+              score: attempt.correct_count || 0,
+              total_questions: attempt.total_questions,
+              completed_at: attempt.completed_at || null,
+              expires_at: pack.quiz_expires_at || null,   // deadline the player had to play by
+              prize_paid: attempt.prize_paid,             // null if failed or in_progress
+            },
           };
         })(),
       };
