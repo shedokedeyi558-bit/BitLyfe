@@ -802,6 +802,130 @@ router.post('/:id/score', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/blitz/:id/cancel
+ *
+ * Cancel a tournament and refund all registered players.
+ *
+ * Rules:
+ *  - Allowed from: draft, registration, active
+ *  - Rejected from: scoring, completed (money already distributed)
+ *  - Idempotent: already-cancelled → returns success immediately
+ *  - Refund: credited back to players[].balance (real balance, not bonus)
+ *    using actual entry_fee_paid from blitz_registrations, not the
+ *    tournament's entry_fee — handles free/discount ticket entries correctly
+ *
+ * Returns: { message, refunded: N } where N = number of players refunded
+ */
+router.post('/:id/cancel', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: tournament, error: tErr } = await supabase
+      .from('blitz_tournaments')
+      .select('id, title, status')
+      .eq('id', id)
+      .single();
+
+    if (tErr || !tournament) {
+      return res.status(404).json({ success: false, error: 'Tournament not found' });
+    }
+
+    // Idempotent: already cancelled
+    if (tournament.status === 'cancelled') {
+      return res.json({ success: true, data: { message: 'Tournament already cancelled', refunded: 0 } });
+    }
+
+    // Block cancellation after scoring has started — money is already in flight
+    if (tournament.status === 'scoring' || tournament.status === 'completed') {
+      return res.status(409).json({
+        success: false,
+        error: `Cannot cancel a tournament with status '${tournament.status}'. Prizes may have already been distributed.`,
+      });
+    }
+
+    // Draft has no payments — mark cancelled immediately, nothing to refund
+    if (tournament.status === 'draft') {
+      await supabase
+        .from('blitz_tournaments')
+        .update({ status: 'cancelled' })
+        .eq('id', id);
+
+      return res.json({ success: true, data: { message: 'Tournament cancelled', refunded: 0 } });
+    }
+
+    // registration or active — fetch all registrations with actual amounts paid
+    // Use entry_fee_paid from blitz_registrations (not tournament.entry_fee) so free/discount
+    // ticket entries are handled correctly: they paid ₦0 and receive ₦0 back.
+    const { data: registrations, error: regErr } = await supabase
+      .from('blitz_registrations')
+      .select('id, player_id, entry_fee_paid')
+      .eq('tournament_id', id);
+
+    if (regErr) {
+      console.error('Cancel blitz — fetch registrations error:', regErr.message);
+      return res.status(500).json({ success: false, error: 'Failed to fetch registrations' });
+    }
+
+    // Mark cancelled first — prevents new registrations racing in during refunds
+    const { error: cancelErr } = await supabase
+      .from('blitz_tournaments')
+      .update({ status: 'cancelled' })
+      .eq('id', id);
+
+    if (cancelErr) {
+      console.error('Cancel blitz — status update error:', cancelErr.message);
+      return res.status(500).json({ success: false, error: 'Failed to cancel tournament' });
+    }
+
+    // Refund each player who actually paid
+    let refundedCount = 0;
+    for (const reg of registrations || []) {
+      const amount = Number(reg.entry_fee_paid || 0);
+      if (amount <= 0) continue; // free ticket entry — nothing to refund
+
+      // Credit balance back
+      const { data: player } = await supabase
+        .from('players')
+        .select('balance')
+        .eq('id', reg.player_id)
+        .single();
+
+      if (!player) {
+        console.error(`Cancel blitz — player ${reg.player_id} not found, skipping refund`);
+        continue;
+      }
+
+      await supabase
+        .from('players')
+        .update({ balance: (player.balance || 0) + amount })
+        .eq('id', reg.player_id);
+
+      await supabase.from('transactions').insert({
+        player_id: reg.player_id,
+        type: 'blitz_refund',
+        amount,
+        description: `Refund — ${tournament.title} was cancelled`,
+      });
+
+      refundedCount++;
+    }
+
+    console.log(`[blitz cancel] ${id} "${tournament.title}" cancelled. ${refundedCount} players refunded.`);
+
+    return res.json({
+      success: true,
+      data: {
+        message: 'Tournament cancelled',
+        refunded: refundedCount,
+      },
+    });
+  } catch (err) {
+    console.error('Cancel blitz error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to cancel tournament' });
+  }
+});
+
 // ─── ADMIN VIEWS ──────────────────────────────────────────────────────────────
 
 /**
