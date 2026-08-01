@@ -91,6 +91,7 @@ async function getSpecialPacks(req, res) {
       quiz_expires_at: p.quiz_expires_at || null,
       max_entries: p.max_entries || null,
       current_entries: p.current_entries || 0,
+      entry_cap_reached: p.max_entries != null && (p.current_entries || 0) >= p.max_entries,
       available_question_count: availableCountByPack[p.id] || 0,
       user_attempted: !!userAttemptedByPack[p.id],
     }));
