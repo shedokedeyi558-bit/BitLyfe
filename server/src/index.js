@@ -26,6 +26,9 @@ const adminSpecialsBankRoutes = require('./routes/adminSpecialsBank');
 const supabase = require('./db/supabase');
 const { checkAndAdvanceBlitzStatuses } = require('./services/blitzScheduler');
 const { finalizeTimedOutAttempts } = require('./services/specialsScheduler');
+const { expireStaleRequests } = require('./services/adminChallengeScheduler');
+const adminChallengeRoutes = require('./routes/adminChallenge');
+const adminChallengeAdminRoutes = require('./routes/adminChallengeAdmin');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -171,11 +174,13 @@ app.use('/api/admin/predictions', adminPredictionsRoutes);
 app.use('/api/admin/blitz', adminBlitzRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);
 app.use('/api/admin/challenges', challengeRoutes);
+app.use('/api/admin/beat-the-admin', adminChallengeAdminRoutes);
 // Generic admin router (stats, players, settings, analytics, seed, export, etc.)
 app.use('/api/admin', adminRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/challenges', challengeRoutes);
 app.use('/api/player/referrals', referralsRouter);
+app.use('/api/admin-challenge', adminChallengeRoutes);
 
 // ─── SquadCo Webhook ─────────────────────────────────────────────────────────
 
@@ -469,11 +474,18 @@ app.listen(PORT, () => {
   // ── Specials attempt finalizer ────────────────────────────────────────────
   // Finds in-progress special_attempts where the exam timer has expired and
   // finalizes them — grades submitted answers, sets passed/failed, credits prize.
-  // Catches the case where a player abandons mid-attempt and never hits an endpoint.
   finalizeTimedOutAttempts().catch(() => {});
   setInterval(() => {
     finalizeTimedOutAttempts().catch(() => {});
   }, 90 * 1000); // 90 seconds — same cadence as Blitz scheduler
+
+  // ── Beat the Admin — expiry sweep ─────────────────────────────────────────
+  // Finds pending admin_challenge_requests past expires_at and marks them expired,
+  // refunding the stake. 15s cadence for responsive UX on the 60s default expiry.
+  expireStaleRequests().catch(() => {});
+  setInterval(() => {
+    expireStaleRequests().catch(() => {});
+  }, 15 * 1000);
 });
 
 module.exports = app;
