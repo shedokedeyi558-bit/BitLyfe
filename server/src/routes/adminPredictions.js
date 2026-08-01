@@ -538,7 +538,7 @@ router.get('/:id/participations', async (req, res) => {
 /**
  * GET /api/admin/predictions/:id/participants
  * Review all participants before revealing an answer.
- * Returns masked phone, submitted answer, and submission timestamp.
+ * Returns full phone number, submitted answer, and submission timestamp.
  * Participants who entered but haven't submitted yet are included (answer will be null).
  */
 router.get('/:id/participants', async (req, res) => {
@@ -597,15 +597,11 @@ router.get('/:id/participants', async (req, res) => {
 
     const participants = participations.map((p) => {
       const pl = playerMap[p.player_id] || {};
-      const phone = pl.phone || '';
-      const masked = phone.length >= 6
-        ? `${phone.slice(0, 4)}***${phone.slice(-2)}`
-        : '***';
 
       return {
         id: p.id,
         player_id: p.player_id,
-        phone: masked,
+        phone: pl.phone || null,
         name: pl.name || null,
         answer: p.answer || null,
         submitted_at: p.submitted_at || null,
