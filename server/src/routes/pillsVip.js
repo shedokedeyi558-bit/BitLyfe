@@ -417,6 +417,11 @@ router.post('/start', idempotency(), auth, async (req, res) => {
     const packId = req.body.packId || req.body.pack_id;
     const player = req.player;
 
+    // Fire-and-forget catch-up — finalizes any timed-out attempts from other packs
+    // so admin dashboard reflects real state even if the scheduler missed a window
+    const { finalizeTimedOutAttempts } = require('../services/specialsScheduler');
+    finalizeTimedOutAttempts().catch(() => {});
+
     if (!packId) {
       return res.status(400).json({ success: false, error: 'packId is required' });
     }

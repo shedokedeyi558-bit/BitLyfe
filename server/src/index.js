@@ -460,13 +460,19 @@ app.listen(PORT, () => {
   // ── Blitz auto-scheduler ──────────────────────────────────────────────────
   // Run immediately on startup to catch up any missed windows during downtime,
   // then every 90 seconds while the process is alive.
-  // On Render free tier (kept awake by external ping every ~5 min), this means
-  // a tournament will advance within ~90s of its scheduled time when the server
-  // is awake, or within one ping cycle after a sleep gap.
   checkAndAdvanceBlitzStatuses('scheduler').catch(() => {});
   setInterval(() => {
     checkAndAdvanceBlitzStatuses('scheduler').catch(() => {});
   }, 90 * 1000); // 90 seconds
+
+  // ── Specials attempt finalizer ────────────────────────────────────────────
+  // Finds in-progress special_attempts where the exam timer has expired and
+  // finalizes them — grades submitted answers, sets passed/failed, credits prize.
+  // Catches the case where a player abandons mid-attempt and never hits an endpoint.
+  finalizeTimedOutAttempts().catch(() => {});
+  setInterval(() => {
+    finalizeTimedOutAttempts().catch(() => {});
+  }, 90 * 1000); // 90 seconds — same cadence as Blitz scheduler
 });
 
 module.exports = app;
