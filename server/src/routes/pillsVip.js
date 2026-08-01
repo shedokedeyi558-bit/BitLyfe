@@ -16,6 +16,7 @@ const supabase = require('../db/supabase');
 const auth = require('../middleware/auth');
 const idempotency = require('../middleware/idempotency');
 const { checkAnswer } = require('../services/gameLogic');
+const { finalizeTimedOutAttempts } = require('../services/specialsScheduler');
 const { createNotification } = require('./notifications');
 const { deductEntryFee } = require('../services/billing');
 
@@ -419,7 +420,6 @@ router.post('/start', idempotency(), auth, async (req, res) => {
 
     // Fire-and-forget catch-up — finalizes any timed-out attempts from other packs
     // so admin dashboard reflects real state even if the scheduler missed a window
-    const { finalizeTimedOutAttempts } = require('../services/specialsScheduler');
     finalizeTimedOutAttempts().catch(() => {});
 
     if (!packId) {

@@ -17,7 +17,6 @@
 
 const supabase = require('../db/supabase');
 const { checkAnswer } = require('../services/gameLogic');
-const { createNotification } = require('../routes/notifications');
 
 /**
  * Grade a set of submitted answers against their pills.
@@ -169,15 +168,19 @@ async function finalizeTimedOutAttempts() {
           }
         }
 
-        // Notify player of result
+        // Notify player of result (direct insert — avoids circular require with notifications.js)
         try {
           const title = passed ? 'Special Exam Passed! 🎉' : 'Special Exam Ended';
           const message = passed
             ? `You passed "${pack.name}" with ${correct_count}/${questionIds.length} correct! ₦${parseFloat(pack.prize || 0).toLocaleString()} credited.`
             : `Your attempt on "${pack.name}" has ended. You got ${correct_count}/${questionIds.length} correct.`;
-          await createNotification(attempt.player_id, passed ? 'win' : 'loss', title, message);
+          await supabase.from('notifications').insert({
+            player_id: attempt.player_id,
+            type: passed ? 'win' : 'loss',
+            title,
+            message,
+          });
         } catch (notifErr) {
-          // Non-fatal — don't block on notification failures
           console.error(`[specialsScheduler] notification failed for ${attempt.id}:`, notifErr.message);
         }
       } catch (attemptErr) {
