@@ -16,7 +16,7 @@
  */
 
 const supabase = require('../db/supabase');
-const { checkAnswer } = require('../services/gameLogic');
+const { checkAnswer } = require('./gameLogic');
 
 /**
  * Grade a set of submitted answers against their pills.
