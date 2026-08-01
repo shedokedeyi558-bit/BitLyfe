@@ -540,20 +540,38 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       });
     }
 
-    // Block new entries if max_entries cap is reached.
-    // Both limits are independent — whichever hits first closes the pack.
-    if (pack.max_entries !== null && pack.max_entries !== undefined) {
-      const currentEntries = pack.current_entries || 0;
-      if (currentEntries >= pack.max_entries) {
-        return res.status(410).json({
-          success: false,
-          code: 'ENTRY_CAP_REACHED',
-          error: `This pack has reached its maximum entries (${pack.max_entries}). It is now closed.`,
-          current_entries: currentEntries,
-          max_entries: pack.max_entries,
-        });
-      }
+    // ── Atomic pack claim ──────────────────────────────────────────────────────
+    // claim_pack_for_player() atomically increments current_entries ONLY when
+    // current_entries < max_entries (or max_entries IS NULL). Returns claimed=true
+    // if a slot was reserved, false if the cap is already reached.
+    //
+    // This MUST run before deductEntryFee(). If it returns false the player is
+    // rejected here without any charge — no refund path needed.
+    // If billing or attempt insert fails after a successful claim, release_pack_claim()
+    // decrements current_entries back so the slot opens for the next player.
+    let packClaimed = false;
+    const { data: claimResult, error: claimErr } = await supabase
+      .rpc('claim_pack_for_player', { p_pack_id: packId });
+
+    if (claimErr) {
+      console.error('VIP start — claim_pack_for_player RPC error:', claimErr.message);
+      return res.status(500).json({ success: false, error: 'Failed to reserve pack slot' });
     }
+
+    // claimResult is an array with one row: [{ claimed: true|false }]
+    const claimed = Array.isArray(claimResult) ? claimResult[0]?.claimed : claimResult;
+
+    if (!claimed) {
+      return res.status(410).json({
+        success: false,
+        code: 'ENTRY_CAP_REACHED',
+        error: `This pack has reached its maximum entries (${pack.max_entries}). It is now closed.`,
+        current_entries: pack.current_entries,
+        max_entries: pack.max_entries,
+      });
+    }
+
+    packClaimed = true; // slot is now held — must release if anything below fails
 
     // Fetch ALL non-deleted pills from the bank — regardless of status.
     // For Specials, each player draws a fresh randomized set from the full bank.
@@ -612,6 +630,12 @@ router.post('/start', idempotency(), auth, async (req, res) => {
           description: `VIP pack entry: ${pack.name}`,
         });
       } catch (billingErr) {
+        // Billing failed — release the atomic claim so the slot is available again
+        if (packClaimed) {
+          supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(e =>
+            console.error('release_pack_claim failed after billing error:', e.message)
+          );
+        }
         if (billingErr.insufficientFunds) {
           return res.status(402).json({ success: false, error: billingErr.message });
         }
@@ -642,12 +666,17 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       .single();
 
     if (attemptErr) {
-      // Refund if insert failed
+      // Attempt insert failed — refund billing AND release the atomic claim
       if (billing) {
         await supabase.from('players').update({
           balance: player.balance,
           bonus_balance: player.bonus_balance || 0,
         }).eq('id', player.id);
+      }
+      if (packClaimed) {
+        supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(e =>
+          console.error('release_pack_claim failed after attempt insert error:', e.message)
+        );
       }
       if (attemptErr.code === '23505') {
         return res.status(409).json({
@@ -660,11 +689,8 @@ router.post('/start', idempotency(), auth, async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to start VIP attempt' });
     }
 
-    // Increment current_entries on the pack — fire-and-forget, never blocks response.
-    // This is what powers entries_made / entry_cap_reached on the admin pack list.
-    Promise.resolve(
-      supabase.rpc('increment_pack_entries', { p_id: packId })
-    ).catch((err) => console.error('increment_pack_entries failed:', err));
+    // current_entries was already incremented atomically by claim_pack_for_player() above.
+    // No separate fire-and-forget increment needed here.
 
     const pills = await getPillsByIds(selectedIds);
 
