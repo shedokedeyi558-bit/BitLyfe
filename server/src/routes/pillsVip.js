@@ -50,11 +50,13 @@ async function getSpecialPacks(req, res) {
     let userAttemptedByPack = {};
 
     if (packIds.length > 0) {
+      // Count total attached questions per pack (no status filter — fixed-set packs
+      // don't consume questions, so 'available' vs 'played' status is irrelevant here)
       const { data: pillCounts } = await supabase
         .from('pills')
         .select('pack_id')
         .in('pack_id', packIds)
-        .eq('status', 'available');
+        .is('deleted_at', null);
 
       for (const row of pillCounts || []) {
         availableCountByPack[row.pack_id] = (availableCountByPack[row.pack_id] || 0) + 1;
@@ -573,51 +575,60 @@ router.post('/start', idempotency(), auth, async (req, res) => {
 
     packClaimed = true; // slot is now held — must release if anything below fails
 
-    // Fetch ALL non-deleted pills from the bank — regardless of status.
-    // For Specials, each player draws a fresh randomized set from the full bank.
-    // The pill 'status' column (available/played) is only meaningful for Standard Pills
-    // where a pill is globally consumed on first play. Specials are NOT stock-gated —
-    // entry is gated only by quiz_expires_at (checked above) and one-attempt-per-account.
-    const { data: bankPills, error: bankErr } = await supabase
+    // Fetch ALL non-deleted pills for this pack in creation order (fixed set).
+    // Since only one player ever claims this pack, there is no randomization —
+    // the player sees the exact questions the admin attached, in order.
+    // No bank-pooling, no subset draw, no per-attempt shuffle.
+    const { data: packPills, error: bankErr } = await supabase
       .from('pills')
       .select('id')
       .eq('pack_id', packId)
-      .is('deleted_at', null);   // exclude only soft-deleted pills
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true });
 
     if (bankErr) {
       console.error('VIP start — pills query error:', bankErr);
+      supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(() => {});
       return res.status(500).json({ success: false, error: 'Failed to fetch pack questions' });
     }
 
-    const bankSize = (bankPills || []).length;
-    const effectiveQuestionCount = questionCount || bankSize;
+    const packSize = (packPills || []).length;
+    // effectiveQuestionCount: use pack.question_count if set, else all pills in pack
+    const effectiveQuestionCount = questionCount || packSize;
 
-    if (bankSize < effectiveQuestionCount) {
+    if (packSize === 0) {
+      supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(() => {});
       return res.status(409).json({
         success: false,
         code: 'INSUFFICIENT_QUESTIONS',
-        error: `Pack has only ${bankSize} available question(s), needs at least ${effectiveQuestionCount}.`,
+        error: 'This pack has no questions attached yet.',
       });
     }
 
-    if (bankSize === 0) {
+    if (packSize < effectiveQuestionCount) {
+      supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(() => {});
       return res.status(409).json({
         success: false,
         code: 'INSUFFICIENT_QUESTIONS',
-        error: 'This pack has no available questions yet.',
+        error: `Pack has only ${packSize} question(s), needs at least ${effectiveQuestionCount}.`,
       });
     }
+
+    // Fixed question set — IDs in creation order, no randomization
+    const selectedIds = packPills.slice(0, effectiveQuestionCount).map(p => p.id);
 
     // Check spend limits
     if (entryFee > 0) {
       const limitCheck = await checkSpendLimit(player.id, entryFee);
       if (!limitCheck.allowed) {
+        supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(() => {});
         return res.status(429).json({ success: false, code: 'LIMIT_REACHED', error: limitCheck.reason });
       }
     }
 
     // Check balance
     if (entryFee > 0 && (player.balance || 0) + (player.bonus_balance || 0) < entryFee) {
+      supabase.rpc('release_pack_claim', { p_pack_id: packId }).catch(() => {});
       return res.status(402).json({ success: false, error: 'Insufficient balance' });
     }
 
@@ -642,12 +653,6 @@ router.post('/start', idempotency(), auth, async (req, res) => {
         throw billingErr;
       }
     }
-
-    // Smart question selection: unseen questions first, then already-seen ones.
-    // Falls back to plain shuffle if migration not yet applied.
-    const selectedIds = await selectQuestionsForAttempt(
-      packId, player.id, effectiveQuestionCount, bankPills
-    );
 
     // Create attempt row in special_attempts
     const { data: attempt, error: attemptErr } = await supabase

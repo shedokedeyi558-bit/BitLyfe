@@ -83,7 +83,9 @@ router.get('/packs/:packId/questions', async (req, res) => {
       created_at: q.created_at,
     }));
 
-    const bankSize = qs.filter((q) => q.status === 'available').length;
+    // Under fixed-set packs, all attached questions are the bank — no status filter.
+    // coverage_ratio is always 1.0 when questions match question_count (the set IS the bank).
+    const bankSize = qs.length; // total attached, not filtered by status
     const qc = pack.question_count || null;
 
     return res.json({
