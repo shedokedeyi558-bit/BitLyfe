@@ -25,6 +25,7 @@ const pillsVipRoutes = require('./routes/pillsVip');
 const adminSpecialsBankRoutes = require('./routes/adminSpecialsBank');
 const supabase = require('./db/supabase');
 const { checkAndAdvanceBlitzStatuses } = require('./services/blitzScheduler');
+const { finalizeTimedOutAttempts } = require('./services/specialsScheduler');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
