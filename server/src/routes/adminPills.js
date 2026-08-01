@@ -58,16 +58,58 @@ router.get('/packs', async (req, res) => {
         .from('pills')
         .select('id, pack_id, question, category, entry_fee, prize, format, color, timer_seconds, status, correct_answer, options')
         .in('pack_id', packIds)
-        .is('deleted_at', null)        // exclude soft-deleted from admin pack view
+        .is('deleted_at', null)
         .order('created_at', { ascending: true });
 
       pills = pillData || [];
     }
 
+    // Build pills-by-pack lookup
     const pillsByPack = {};
     for (const pill of pills) {
       if (!pillsByPack[pill.pack_id]) pillsByPack[pill.pack_id] = [];
       pillsByPack[pill.pack_id].push(pill);
+    }
+
+    // Fetch attempt data for all packs in one query — one attempt per pack (one-player model)
+    // special_attempts: player_id, status ('in_progress'|'passed'|'failed'),
+    //                   correct_count, question_ids, started_at, completed_at, total_time_seconds
+    let attemptsByPack = {};
+    if (packIds.length > 0) {
+      const { data: attempts } = await supabase
+        .from('special_attempts')
+        .select('pack_id, player_id, status, correct_count, question_ids, started_at, completed_at, total_time_seconds')
+        .in('pack_id', packIds);
+
+      if (attempts && attempts.length > 0) {
+        // Fetch claiming players' phone numbers in one batch
+        const playerIds = [...new Set(attempts.map(a => a.player_id))];
+        const playerPhones = {};
+        if (playerIds.length > 0) {
+          const { data: players } = await supabase
+            .from('players')
+            .select('id, phone, name')
+            .in('id', playerIds);
+          for (const p of players || []) {
+            playerPhones[p.id] = { phone: p.phone, name: p.name };
+          }
+        }
+
+        for (const a of attempts) {
+          const playerInfo = playerPhones[a.player_id] || {};
+          attemptsByPack[a.pack_id] = {
+            player_id: a.player_id,
+            player_phone: playerInfo.phone || null,
+            player_name: playerInfo.name || null,
+            attempt_status: a.status,             // 'in_progress' | 'passed' | 'failed'
+            correct_count: a.correct_count || 0,
+            total_questions: (a.question_ids || []).length,
+            started_at: a.started_at,
+            completed_at: a.completed_at || null,
+            total_time_seconds: a.total_time_seconds,
+          };
+        }
+      }
     }
 
     const result = (packs || []).map((pack) => {
@@ -134,6 +176,39 @@ router.get('/packs', async (req, res) => {
         time_limit_minutes: isSpecial && pack.total_time_seconds
           ? Math.round(pack.total_time_seconds / 60)
           : null,
+        // ── Claim / attempt data (Specials one-player model) ───────────────
+        // claim_status: derived from special_attempts row for this pack
+        //   'available'            — no attempt exists, pack is open
+        //   'claimed_not_played'   — attempt in_progress, timer still running
+        //   'won'                  — attempt status = 'passed'
+        //   'lost'                 — attempt status = 'failed'
+        // claimer_*: only set when claim_status !== 'available'
+        // score: correct_count / total_questions — only set when won or lost
+        // time_remaining_seconds: only set when claimed_not_played
+        ...(() => {
+          const attempt = attemptsByPack[pack.id];
+          if (!attempt) {
+            return { claim_status: 'available', claimer_phone: null, claimer_name: null, claimer_player_id: null, score: null, completed_at: null, time_remaining_seconds: null };
+          }
+          const now = new Date();
+          const elapsedSecs = Math.floor((now - new Date(attempt.started_at)) / 1000);
+          const remaining = Math.max(0, (attempt.total_time_seconds || 0) - elapsedSecs);
+          const claimStatus =
+            attempt.attempt_status === 'passed' ? 'won' :
+            attempt.attempt_status === 'failed' ? 'lost' :
+            'claimed_not_played';
+          return {
+            claim_status: claimStatus,
+            claimer_phone: attempt.player_phone,
+            claimer_name: attempt.player_name,
+            claimer_player_id: attempt.player_id,
+            score: (attempt.attempt_status === 'passed' || attempt.attempt_status === 'failed')
+              ? { correct: attempt.correct_count, total: attempt.total_questions }
+              : null,
+            completed_at: attempt.completed_at || null,
+            time_remaining_seconds: claimStatus === 'claimed_not_played' ? remaining : null,
+          };
+        })(),
       };
     })
     // ── Filter archived packs if includeInactive=false ──────────────────────
