@@ -340,4 +340,77 @@ router.post('/move', auth, async (req, res) => {
   }
 });
 
+// ─── GET /api/admin-challenge/history ────────────────────────────────────────
+/**
+ * Returns the player's own past requests/matches (all statuses), most recent first.
+ * Query params: ?page=1&limit=20
+ *
+ * Each entry includes: stake, game_type, request status, outcome (if played),
+ * payout (if won), completed_at.
+ */
+router.get('/history', auth, async (req, res) => {
+  try {
+    const player = req.player;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    const { data: requests, count, error } = await supabase
+      .from('admin_challenge_requests')
+      .select('id, game_type, stake, status, requested_at, expires_at, match_id', { count: 'exact' })
+      .eq('player_id', player.id)
+      .order('requested_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) return res.status(500).json({ success: false, error: 'Failed to fetch history' });
+
+    // Batch-fetch associated matches for rows that have a match_id
+    const matchIds = (requests || []).filter(r => r.match_id).map(r => r.match_id);
+    let matchMap = {};
+    if (matchIds.length > 0) {
+      const { data: matches } = await supabase
+        .from('admin_matches')
+        .select('id, game_type, stake, payout, status, player_move, admin_move, winner, started_at, completed_at')
+        .in('id', matchIds);
+      for (const m of matches || []) matchMap[m.id] = m;
+    }
+
+    const history = (requests || []).map(r => {
+      const match = r.match_id ? (matchMap[r.match_id] || null) : null;
+      return {
+        request_id: r.id,
+        game_type: r.game_type,
+        stake: r.stake,
+        request_status: r.status,             // 'pending'|'approved'|'expired'|'rejected'
+        requested_at: r.requested_at,
+        expires_at: r.expires_at,
+        match: match ? {
+          match_id: match.id,
+          status: match.status,               // 'in_progress'|'completed'
+          player_move: match.player_move,     // null until submitted
+          admin_move: match.winner ? match.admin_move : null, // only revealed after resolution
+          winner: match.winner,               // null|'player'|'admin'|'draw'
+          payout: match.winner === 'player' ? match.payout : (match.winner === 'draw' ? match.stake : 0),
+          started_at: match.started_at,
+          completed_at: match.completed_at,
+        } : null,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        history,
+        total: count || 0,
+        page,
+        limit,
+      },
+    });
+  } catch (err) {
+    console.error('admin-challenge/history error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch history' });
+  }
+});
+
 module.exports = router;
+
