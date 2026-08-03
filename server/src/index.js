@@ -29,6 +29,7 @@ const { finalizeTimedOutAttempts } = require('./services/specialsScheduler');
 const { expireStaleRequests } = require('./services/adminChallengeScheduler');
 const adminChallengeRoutes = require('./routes/adminChallenge');
 const adminChallengeAdminRoutes = require('./routes/adminChallengeAdmin');
+const adminTreasureBoxRoutes = require('./routes/adminTreasureBox');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -175,6 +176,7 @@ app.use('/api/admin/blitz', adminBlitzRoutes);
 app.use('/api/admin/withdrawals', withdrawalRoutes);
 app.use('/api/admin/challenges', challengeRoutes);
 app.use('/api/admin/beat-the-admin', adminChallengeAdminRoutes);
+app.use('/api/admin/treasure-box', adminTreasureBoxRoutes);
 // Generic admin router (stats, players, settings, analytics, seed, export, etc.)
 app.use('/api/admin', adminRoutes);
 app.use('/api/wallet', walletRoutes);
