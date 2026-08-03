@@ -227,4 +227,132 @@ router.put('/settings', async (req, res) => {
   }
 });
 
+// ─── POST /api/admin/treasure-box/boxes ──────────────────────────────────────
+/**
+ * Create a new available treasure box.
+ * Body: { treasure_slot_index }
+ * Snapshots total_slots, pop_limit, payout_multiplier from current settings.
+ */
+router.post('/boxes', async (req, res) => {
+  try {
+    const { treasure_slot_index } = req.body;
+
+    const { data: settings } = await supabase
+      .from('treasure_box_settings')
+      .select('total_slots, pop_limit, payout_multiplier, is_available')
+      .eq('id', 1)
+      .single();
+
+    if (!settings) return res.status(500).json({ success: false, error: 'Settings not configured' });
+
+    if (!settings.is_available) {
+      return res.status(409).json({ success: false, error: 'Treasure Box feature is currently disabled' });
+    }
+
+    const slotIdx = Math.floor(Number(treasure_slot_index));
+    if (isNaN(slotIdx) || slotIdx < 0 || slotIdx >= settings.total_slots) {
+      return res.status(400).json({
+        success: false,
+        error: `treasure_slot_index must be between 0 and ${settings.total_slots - 1}`,
+      });
+    }
+
+    const { data: box, error: insertErr } = await supabase
+      .from('treasure_boxes')
+      .insert({
+        total_slots:         settings.total_slots,
+        pop_limit:           settings.pop_limit,
+        payout_multiplier:   settings.payout_multiplier,
+        treasure_slot_index: slotIdx,
+        status:              'available',
+      })
+      .select('id, total_slots, pop_limit, payout_multiplier, status, created_at')
+      .single();
+
+    if (insertErr || !box) {
+      console.error('Create treasure box error:', insertErr?.message);
+      return res.status(500).json({ success: false, error: 'Failed to create box' });
+    }
+
+    // treasure_slot_index intentionally omitted from response (admin created it, they know it)
+    return res.status(201).json({ success: true, data: { box } });
+  } catch (err) {
+    console.error('POST /admin/treasure-box/boxes error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to create box' });
+  }
+});
+
+// ─── GET /api/admin/treasure-box/boxes ───────────────────────────────────────
+/**
+ * List all boxes with full detail including claimed player phone and outcome.
+ */
+router.get('/boxes', async (req, res) => {
+  try {
+    const { status: statusFilter } = req.query;
+
+    let query = supabase
+      .from('treasure_boxes')
+      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, status, stake, payout, outcome, created_at, claimed_at, completed_at, claimed_by, players(phone, name)')
+      .order('created_at', { ascending: false });
+
+    if (statusFilter) query = query.eq('status', statusFilter);
+
+    const { data: boxes, error } = await query;
+    if (error) return res.status(500).json({ success: false, error: 'Failed to fetch boxes' });
+
+    const result = (boxes || []).map(b => ({
+      id:                  b.id,
+      total_slots:         b.total_slots,
+      pop_limit:           b.pop_limit,
+      payout_multiplier:   Number(b.payout_multiplier),
+      treasure_slot_index: b.treasure_slot_index, // admin sees this
+      status:              b.status,
+      stake:               b.stake,
+      payout:              b.payout,
+      outcome:             b.outcome,
+      claimed_by:          b.claimed_by,
+      player_phone:        b.players?.phone || null,
+      player_name:         b.players?.name || null,
+      created_at:          b.created_at,
+      claimed_at:          b.claimed_at,
+      completed_at:        b.completed_at,
+    }));
+
+    return res.json({ success: true, data: { boxes: result, total: result.length } });
+  } catch (err) {
+    console.error('GET /admin/treasure-box/boxes error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch boxes' });
+  }
+});
+
+// ─── DELETE /api/admin/treasure-box/boxes/:id ─────────────────────────────────
+/**
+ * Delete an unclaimed box (status='available' only).
+ */
+router.delete('/boxes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: box } = await supabase
+      .from('treasure_boxes')
+      .select('id, status')
+      .eq('id', id)
+      .single();
+
+    if (!box) return res.status(404).json({ success: false, error: 'Box not found' });
+    if (box.status !== 'available') {
+      return res.status(409).json({
+        success: false,
+        error: `Cannot delete a box with status "${box.status}" — only available (unclaimed) boxes can be deleted`,
+      });
+    }
+
+    await supabase.from('treasure_boxes').delete().eq('id', id);
+    return res.json({ success: true, data: { message: 'Box deleted' } });
+  } catch (err) {
+    console.error('DELETE /admin/treasure-box/boxes/:id error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete box' });
+  }
+});
+
 module.exports = router;
