@@ -47,16 +47,14 @@ router.get('/settings', async (req, res) => {
     return res.json({
       success: true,
       data: {
-        settings: {
-          total_slots:       settings.total_slots,
-          pop_limit:         settings.pop_limit,
-          payout_multiplier: Number(settings.payout_multiplier),
-          min_stake:         settings.min_stake,
-          max_stake:         settings.max_stake,
-          is_available:      settings.is_available,
-        },
-        rtp: parseFloat(rtp.toFixed(4)),         // e.g. 0.72
-        rtp_percent: parseFloat((rtp * 100).toFixed(2)), // e.g. 72.00
+        total_slots:       settings.total_slots,
+        pop_limit:         settings.pop_limit,
+        payout_multiplier: Number(settings.payout_multiplier),
+        min_stake:         settings.min_stake,
+        max_stake:         settings.max_stake,
+        is_available:      settings.is_available,
+        rtp:               parseFloat(rtp.toFixed(4)),
+        rtp_percent:       parseFloat((rtp * 100).toFixed(2)),
       },
     });
   } catch (err) {
@@ -208,17 +206,15 @@ router.put('/settings', async (req, res) => {
     return res.json({
       success: true,
       data: {
-        settings: {
-          total_slots:       saved.total_slots,
-          pop_limit:         saved.pop_limit,
-          payout_multiplier: Number(saved.payout_multiplier),
-          min_stake:         saved.min_stake,
-          max_stake:         saved.max_stake,
-          is_available:      saved.is_available,
-        },
-        rtp:         parseFloat(savedRTP.toFixed(4)),
-        rtp_percent: parseFloat((savedRTP * 100).toFixed(2)),
-        forced:      rtp > RTP_SAFETY_THRESHOLD && force === true,
+        total_slots:       saved.total_slots,
+        pop_limit:         saved.pop_limit,
+        payout_multiplier: Number(saved.payout_multiplier),
+        min_stake:         saved.min_stake,
+        max_stake:         saved.max_stake,
+        is_available:      saved.is_available,
+        rtp:               parseFloat(savedRTP.toFixed(4)),
+        rtp_percent:       parseFloat((savedRTP * 100).toFixed(2)),
+        forced:            rtp > RTP_SAFETY_THRESHOLD && force === true,
       },
     });
   } catch (err) {
@@ -275,7 +271,7 @@ router.post('/boxes', async (req, res) => {
     }
 
     // treasure_slot_index intentionally omitted from response (admin created it, they know it)
-    return res.status(201).json({ success: true, data: { box } });
+    return res.status(201).json({ success: true, data: { ...box } });
   } catch (err) {
     console.error('POST /admin/treasure-box/boxes error:', err);
     return res.status(500).json({ success: false, error: 'Failed to create box' });
