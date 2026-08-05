@@ -353,7 +353,6 @@ async function computePlayerStats(playerId) {
                        'admin_challenge_win', 'treasure_box_win'];
   const ENTRY_TYPES = ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry',
                        'admin_challenge_entry', 'treasure_box_entry'];
-
   const entries  = (txns || []).filter((t) => ENTRY_TYPES.includes(t.type));
   const wins     = (txns || []).filter((t) => WIN_TYPES.includes(t.type));
   const totalWon   = wins.reduce((sum, t) => sum + Math.abs(t.amount), 0);
@@ -432,27 +431,33 @@ router.get('/players/:id/stats', async (req, res) => {
       .order('created_at', { ascending: false });
 
     const byMode = {
-      pills:       { played: 0, won: 0, total_won: 0 },
-      predictions: { played: 0, won: 0, total_won: 0 },
-      blitz:       { played: 0, won: 0, total_won: 0 },
-      doors:       { played: 0, won: 0, total_won: 0 },
-      challenges:  { played: 0, won: 0, total_won: 0 },
-      specials:    { played: 0, won: 0, total_won: 0 },
+      pills:         { played: 0, won: 0, total_won: 0 },
+      predictions:   { played: 0, won: 0, total_won: 0 },
+      blitz:         { played: 0, won: 0, total_won: 0 },
+      doors:         { played: 0, won: 0, total_won: 0 },
+      challenges:    { played: 0, won: 0, total_won: 0 },
+      specials:      { played: 0, won: 0, total_won: 0 },
+      beat_the_admin:{ played: 0, won: 0, total_won: 0 },
+      treasure_box:  { played: 0, won: 0, total_won: 0 },
     };
 
     for (const t of txns || []) {
       const amt = Math.abs(t.amount);
-      if (t.type === 'pill_open')         { byMode.pills.played++; }
-      if (t.type === 'pill_win')          { byMode.pills.won++; byMode.pills.total_won += amt; }
-      if (t.type === 'prediction_enter')  { byMode.predictions.played++; }
-      if (t.type === 'prediction_win')    { byMode.predictions.won++; byMode.predictions.total_won += amt; }
-      if (t.type === 'blitz_entry')       { byMode.blitz.played++; }
-      if (t.type === 'blitz_prize')       { byMode.blitz.won++; byMode.blitz.total_won += amt; }
-      if (t.type === 'entry_fee')         { byMode.doors.played++; }
-      if (t.type === 'prize')             { byMode.doors.won++; byMode.doors.total_won += amt; }
-      if (t.type === 'challenge_entry')   { byMode.challenges.played++; }
-      if (t.type === 'challenge_win')     { byMode.challenges.won++; byMode.challenges.total_won += amt; }
-      if (t.type === 'specials_win')      { byMode.specials.won++; byMode.specials.total_won += amt; }
+      if (t.type === 'pill_open')             { byMode.pills.played++; }
+      if (t.type === 'pill_win')              { byMode.pills.won++;          byMode.pills.total_won += amt; }
+      if (t.type === 'prediction_enter')      { byMode.predictions.played++; }
+      if (t.type === 'prediction_win')        { byMode.predictions.won++;    byMode.predictions.total_won += amt; }
+      if (t.type === 'blitz_entry')           { byMode.blitz.played++; }
+      if (t.type === 'blitz_prize')           { byMode.blitz.won++;          byMode.blitz.total_won += amt; }
+      if (t.type === 'entry_fee')             { byMode.doors.played++; }
+      if (t.type === 'prize')                 { byMode.doors.won++;           byMode.doors.total_won += amt; }
+      if (t.type === 'challenge_entry')       { byMode.challenges.played++; }
+      if (t.type === 'challenge_win')         { byMode.challenges.won++;     byMode.challenges.total_won += amt; }
+      if (t.type === 'specials_win')          { byMode.specials.won++;        byMode.specials.total_won += amt; }
+      if (t.type === 'admin_challenge_entry') { byMode.beat_the_admin.played++; }
+      if (t.type === 'admin_challenge_win')   { byMode.beat_the_admin.won++; byMode.beat_the_admin.total_won += amt; }
+      if (t.type === 'treasure_box_entry')    { byMode.treasure_box.played++; }
+      if (t.type === 'treasure_box_win')      { byMode.treasure_box.won++;   byMode.treasure_box.total_won += amt; }
       // pill_open covers specials entries — already counted in pills.played
     }
 
@@ -521,26 +526,32 @@ router.get('/players/:id', async (req, res) => {
       .eq('player_id', id);
 
     const byMode = {
-      pills:       { played: 0, won: 0, total_won: 0 },
-      predictions: { played: 0, won: 0, total_won: 0 },
-      blitz:       { played: 0, won: 0, total_won: 0 },
-      doors:       { played: 0, won: 0, total_won: 0 },
-      challenges:  { played: 0, won: 0, total_won: 0 },
-      specials:    { played: 0, won: 0, total_won: 0 },
+      pills:         { played: 0, won: 0, total_won: 0 },
+      predictions:   { played: 0, won: 0, total_won: 0 },
+      blitz:         { played: 0, won: 0, total_won: 0 },
+      doors:         { played: 0, won: 0, total_won: 0 },
+      challenges:    { played: 0, won: 0, total_won: 0 },
+      specials:      { played: 0, won: 0, total_won: 0 },
+      beat_the_admin:{ played: 0, won: 0, total_won: 0 },
+      treasure_box:  { played: 0, won: 0, total_won: 0 },
     };
     for (const t of txns || []) {
       const amt = Math.abs(t.amount);
-      if (t.type === 'pill_open')        { byMode.pills.played++; }
-      if (t.type === 'pill_win')         { byMode.pills.won++;         byMode.pills.total_won += amt; }
-      if (t.type === 'prediction_enter') { byMode.predictions.played++; }
-      if (t.type === 'prediction_win')   { byMode.predictions.won++;   byMode.predictions.total_won += amt; }
-      if (t.type === 'blitz_entry')      { byMode.blitz.played++; }
-      if (t.type === 'blitz_prize')      { byMode.blitz.won++;         byMode.blitz.total_won += amt; }
-      if (t.type === 'entry_fee')        { byMode.doors.played++; }
-      if (t.type === 'prize')            { byMode.doors.won++;          byMode.doors.total_won += amt; }
-      if (t.type === 'challenge_entry')  { byMode.challenges.played++; }
-      if (t.type === 'challenge_win')    { byMode.challenges.won++;     byMode.challenges.total_won += amt; }
-      if (t.type === 'specials_win')     { byMode.specials.won++;       byMode.specials.total_won += amt; }
+      if (t.type === 'pill_open')             { byMode.pills.played++; }
+      if (t.type === 'pill_win')              { byMode.pills.won++;          byMode.pills.total_won += amt; }
+      if (t.type === 'prediction_enter')      { byMode.predictions.played++; }
+      if (t.type === 'prediction_win')        { byMode.predictions.won++;    byMode.predictions.total_won += amt; }
+      if (t.type === 'blitz_entry')           { byMode.blitz.played++; }
+      if (t.type === 'blitz_prize')           { byMode.blitz.won++;          byMode.blitz.total_won += amt; }
+      if (t.type === 'entry_fee')             { byMode.doors.played++; }
+      if (t.type === 'prize')                 { byMode.doors.won++;           byMode.doors.total_won += amt; }
+      if (t.type === 'challenge_entry')       { byMode.challenges.played++; }
+      if (t.type === 'challenge_win')         { byMode.challenges.won++;     byMode.challenges.total_won += amt; }
+      if (t.type === 'specials_win')          { byMode.specials.won++;        byMode.specials.total_won += amt; }
+      if (t.type === 'admin_challenge_entry') { byMode.beat_the_admin.played++; }
+      if (t.type === 'admin_challenge_win')   { byMode.beat_the_admin.won++; byMode.beat_the_admin.total_won += amt; }
+      if (t.type === 'treasure_box_entry')    { byMode.treasure_box.played++; }
+      if (t.type === 'treasure_box_win')      { byMode.treasure_box.won++;   byMode.treasure_box.total_won += amt; }
       // pill_open is also used for specials entry — counted in pills.played above
     }
 
@@ -650,12 +661,21 @@ router.get('/players/:id/activity', async (req, res) => {
       .range(offset, offset + Number(limit) - 1);
 
     if (type === 'entries') {
-      query = query.in('type', ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry']);
+      query = query.in('type', [
+        'entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry',
+        'admin_challenge_entry', 'treasure_box_entry',
+      ]);
     } else if (type === 'wins') {
-      query = query.in('type', ['prize', 'pill_win', 'prediction_win', 'blitz_prize', 'challenge_win', 'referral_bonus', 'referral_milestone_bonus']);
+      query = query.in('type', [
+        'prize', 'pill_win', 'prediction_win', 'blitz_prize', 'challenge_win',
+        'specials_win', 'admin_challenge_win', 'admin_challenge_draw',
+        'treasure_box_win',
+        'referral_bonus', 'referral_milestone_bonus',
+      ]);
     } else if (type === 'withdrawals') {
       query = query.in('type', ['withdrawal', 'withdrawal_pending', 'withdrawal_refund']);
     }
+    // type === 'all': no filter — return every transaction type for this player
 
     const { data: transactions, error, count } = await query;
 
