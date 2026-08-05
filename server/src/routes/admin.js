@@ -340,6 +340,8 @@ router.put('/doors/:id', async (req, res) => {
  * This is the single source of truth — the players.games_played/games_won/total_won
  * denormalized counters are only updated by door games and are NOT reliable for
  * Pills, Predictions, Specials, or Blitz activity.
+ *
+ * win_rate is returned as a 0-100 percentage (e.g. 40.0 = 40%).
  */
 async function computePlayerStats(playerId) {
   const { data: txns } = await supabase
@@ -347,17 +349,22 @@ async function computePlayerStats(playerId) {
     .select('type, amount')
     .eq('player_id', playerId);
 
-  const WIN_TYPES   = ['prize', 'pill_win', 'specials_win', 'prediction_win', 'blitz_prize', 'challenge_win'];
-  const ENTRY_TYPES = ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry'];
+  const WIN_TYPES   = ['prize', 'pill_win', 'specials_win', 'prediction_win', 'blitz_prize', 'challenge_win',
+                       'admin_challenge_win', 'treasure_box_win'];
+  const ENTRY_TYPES = ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry',
+                       'admin_challenge_entry', 'treasure_box_entry'];
 
   const entries  = (txns || []).filter((t) => ENTRY_TYPES.includes(t.type));
   const wins     = (txns || []).filter((t) => WIN_TYPES.includes(t.type));
-  const totalWon = wins.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+  const totalWon   = wins.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+  const totalSpent = entries.reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
   return {
     games_played: entries.length,
     games_won:    wins.length,
     total_won:    totalWon,
+    total_spent:  totalSpent,
+    // win_rate: 0-100 percentage (e.g. 40.0 = 40%) — NOT a 0-1 fraction
     win_rate:     entries.length > 0 ? parseFloat(((wins.length / entries.length) * 100).toFixed(1)) : 0,
   };
 }
@@ -452,7 +459,18 @@ router.get('/players/:id/stats', async (req, res) => {
     return res.json({
       success: true,
       data: {
-        player: { ...player, ...stats },
+        player: {
+          ...player,
+          ...stats,
+          // Nested stats — canonical going forward, win_rate is 0-100 percentage
+          stats: {
+            games_played: stats.games_played,
+            games_won:    stats.games_won,
+            win_rate:     stats.win_rate,
+            total_won:    stats.total_won,
+            total_spent:  stats.total_spent,
+          },
+        },
         by_mode: byMode,
       },
     });
@@ -587,7 +605,17 @@ router.get('/players/:id', async (req, res) => {
           real_balance: player.balance,
           bonus_balance: player.bonus_balance || 0,
           total_balance: (player.balance || 0) + (player.bonus_balance || 0),
+          // Flat fields for backward compat with existing consumers
           ...stats,
+          // Nested stats object — canonical shape going forward
+          // win_rate is 0-100 percentage (e.g. 40.0 = 40%, NOT 0.4)
+          stats: {
+            games_played: stats.games_played,
+            games_won:    stats.games_won,
+            win_rate:     stats.win_rate,
+            total_won:    stats.total_won,
+            total_spent:  stats.total_spent,
+          },
           by_mode: byMode,
         },
         referral: {
