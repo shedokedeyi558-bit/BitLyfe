@@ -235,7 +235,7 @@ router.get('/:boxId', auth, async (req, res) => {
 
     const { data: box } = await supabase
       .from('treasure_boxes')
-      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, status, stake, payout, outcome, claimed_by, claimed_at, completed_at')
+      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, treasure_slot_indexes, status, stake, payout, outcome, claimed_by, claimed_at, completed_at')
       .eq('id', boxId)
       .single();
 
@@ -254,6 +254,11 @@ router.get('/:boxId', auth, async (req, res) => {
     const popsUsed = (pops || []).length;
     const gameOver = box.status === 'completed';
 
+    // Resolve treasure indexes array
+    const treasureIndexes = box.treasure_slot_indexes
+      ? (Array.isArray(box.treasure_slot_indexes) ? box.treasure_slot_indexes : JSON.parse(box.treasure_slot_indexes))
+      : (box.treasure_slot_index !== null ? [box.treasure_slot_index] : []);
+
     return res.json({
       success: true,
       data: {
@@ -270,8 +275,8 @@ router.get('/:boxId', auth, async (req, res) => {
         pops_used:         popsUsed,
         pops_remaining:    Math.max(0, box.pop_limit - popsUsed),
         game_over:         gameOver,
-        // Only reveal treasure slot once the game is decided
-        treasure_slot_index: gameOver ? box.treasure_slot_index : undefined,
+        // Only reveal treasure positions once game is decided
+        treasure_slot_indexes: gameOver ? treasureIndexes : undefined,
         pops: (pops || []).map(p => ({
           pop_number:   p.pop_number,
           slot_index:   p.slot_index,
@@ -305,10 +310,10 @@ router.post('/:boxId/pop', auth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'slot_index must be a non-negative integer' });
     }
 
-    // Fetch box
+    // Fetch box — include both treasure fields for multi-slot support
     const { data: box } = await supabase
       .from('treasure_boxes')
-      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, status, stake, claimed_by')
+      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, treasure_slot_indexes, status, stake, claimed_by')
       .eq('id', boxId)
       .single();
 
@@ -323,6 +328,11 @@ router.post('/:boxId/pop', auth, async (req, res) => {
     if (slotIndex >= box.total_slots) {
       return res.status(400).json({ success: false, error: `slot_index must be between 0 and ${box.total_slots - 1}` });
     }
+
+    // Resolve treasure slot indexes — support both legacy single int and new array
+    const treasureIndexes = box.treasure_slot_indexes
+      ? (Array.isArray(box.treasure_slot_indexes) ? box.treasure_slot_indexes : JSON.parse(box.treasure_slot_indexes))
+      : (box.treasure_slot_index !== null ? [box.treasure_slot_index] : []);
 
     // Fetch existing pops
     const { data: existingPops } = await supabase
@@ -345,7 +355,7 @@ router.post('/:boxId/pop', auth, async (req, res) => {
     }
 
     const popNumber = popsUsed + 1;
-    const wasTreasure = slotIndex === box.treasure_slot_index;
+    const wasTreasure = treasureIndexes.includes(slotIndex);
     const now = new Date().toISOString();
 
     // Insert pop record
@@ -395,14 +405,14 @@ router.post('/:boxId/pop', auth, async (req, res) => {
       return res.json({
         success: true,
         data: {
-          pop_number:          popNumber,
-          slot_index:          slotIndex,
-          was_treasure:        true,
-          game_over:           true,
-          outcome:             'won',
+          pop_number:           popNumber,
+          slot_index:           slotIndex,
+          was_treasure:         true,
+          game_over:            true,
+          outcome:              'won',
           payout,
-          new_balance:         newBalance,
-          treasure_slot_index: box.treasure_slot_index,  // revealed — game decided
+          new_balance:          newBalance,
+          treasure_slot_indexes: treasureIndexes,  // all revealed — game decided
         },
       });
     }
@@ -418,13 +428,13 @@ router.post('/:boxId/pop', auth, async (req, res) => {
       return res.json({
         success: true,
         data: {
-          pop_number:          popNumber,
-          slot_index:          slotIndex,
-          was_treasure:        false,
-          game_over:           true,
-          outcome:             'lost',
-          payout:              0,
-          treasure_slot_index: box.treasure_slot_index,  // revealed — game decided
+          pop_number:           popNumber,
+          slot_index:           slotIndex,
+          was_treasure:         false,
+          game_over:            true,
+          outcome:              'lost',
+          payout:               0,
+          treasure_slot_indexes: treasureIndexes,  // revealed — game decided
         },
       });
     }

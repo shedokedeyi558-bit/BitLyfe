@@ -4,11 +4,11 @@
  * All routes require adminAuth.
  *
  * Endpoints:
- *   GET /api/admin/treasure-box/settings — current settings + computed rtp
+ *   GET /api/admin/treasure-box/settings — current settings + preview RTP (1 treasure)
  *   PUT /api/admin/treasure-box/settings — update settings with RTP safety guard
- *
- * RTP formula: (pop_limit / total_slots) * payout_multiplier
- * Example defaults: (3 / 25) * 6 = 0.72 = 72%
+ *   POST /api/admin/treasure-box/boxes   — create box with treasure_slot_indexes array
+ *   GET /api/admin/treasure-box/boxes    — list boxes
+ *   DELETE /api/admin/treasure-box/boxes/:id — delete unclaimed box
  */
 
 const express = require('express');
@@ -18,15 +18,60 @@ const adminAuth = require('../middleware/adminAuth');
 const router = express.Router();
 router.use(adminAuth);
 
-const RTP_SAFETY_THRESHOLD = 0.90; // block above 90% by default
+const RTP_SAFETY_THRESHOLD = 0.90;
+const MAX_TREASURE_SLOTS_FRACTION = 0.5; // no more than half the total slots can be treasures
+
+// ─── Combinatorial RTP calculation ────────────────────────────────────────────
 
 /**
- * Compute RTP from the three economic parameters.
- * Returns a number between 0 and 1 (e.g. 0.72 = 72%).
+ * C(n, k) — binomial coefficient using integer arithmetic.
+ * Uses BigInt internally to avoid floating-point precision loss.
  */
-function computeRTP(totalSlots, popLimit, payoutMultiplier) {
-  if (!totalSlots || totalSlots <= 0) return 0;
-  return (popLimit / totalSlots) * payoutMultiplier;
+function comb(n, k) {
+  if (k > n || n < 0 || k < 0) return 0n;
+  if (k === 0 || k === n) return 1n;
+  k = Math.min(k, n - k);
+  let result = 1n;
+  for (let i = 0; i < k; i++) {
+    result = result * BigInt(n - i) / BigInt(i + 1);
+  }
+  return result;
+}
+
+/**
+ * winProbability(totalSlots, popLimit, numTreasures)
+ *
+ * Real formula: P(win) = 1 - C(totalSlots - numTreasures, popLimit) / C(totalSlots, popLimit)
+ * = probability of hitting at least one treasure in popLimit pops from totalSlots slots.
+ *
+ * Returns a number 0-1.
+ *
+ * Worked example: 25 slots, 3 pops, 2 treasures = 23.0000%
+ */
+function winProbability(totalSlots, popLimit, numTreasures) {
+  if (!totalSlots || totalSlots <= 0 || !popLimit || !numTreasures) return 0;
+  const safe = totalSlots - numTreasures;
+  if (safe < popLimit) return 1.0; // can't avoid treasure — guaranteed win
+  const totalC = comb(totalSlots, popLimit);
+  if (totalC === 0n) return 0;
+  const noWinC = comb(safe, popLimit);
+  return 1 - Number(noWinC) / Number(totalC);
+}
+
+/**
+ * computeRTP(totalSlots, popLimit, numTreasures, payoutMultiplier)
+ * Returns 0-1 fraction.
+ */
+function computeRTP(totalSlots, popLimit, numTreasures, payoutMultiplier) {
+  return winProbability(totalSlots, popLimit, numTreasures) * Number(payoutMultiplier);
+}
+
+/**
+ * computeRTPPreview — used for settings display where numTreasures isn't fixed.
+ * Uses numTreasures=1 as the preview baseline (same as the old single-slot model).
+ */
+function computeRTPPreview(totalSlots, popLimit, payoutMultiplier) {
+  return computeRTP(totalSlots, popLimit, 1, payoutMultiplier);
 }
 
 // ─── GET /api/admin/treasure-box/settings ────────────────────────────────────
@@ -42,7 +87,7 @@ router.get('/settings', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Treasure Box settings not found' });
     }
 
-    const rtp = computeRTP(settings.total_slots, settings.pop_limit, Number(settings.payout_multiplier));
+    const rtp = computeRTPPreview(settings.total_slots, settings.pop_limit, Number(settings.payout_multiplier));
 
     return res.json({
       success: true,
@@ -55,6 +100,7 @@ router.get('/settings', async (req, res) => {
         is_available:      settings.is_available,
         rtp:               parseFloat(rtp.toFixed(4)),
         rtp_percent:       parseFloat((rtp * 100).toFixed(2)),
+        rtp_note:          'Preview assumes 1 treasure slot. Actual RTP is computed at box creation from num_treasures.',
       },
     });
   } catch (err) {
@@ -201,7 +247,7 @@ router.put('/settings', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to save settings' });
     }
 
-    const savedRTP = computeRTP(saved.total_slots, saved.pop_limit, Number(saved.payout_multiplier));
+    const savedRTP = computeRTPPreview(saved.total_slots, saved.pop_limit, Number(saved.payout_multiplier));
 
     return res.json({
       success: true,
@@ -215,6 +261,7 @@ router.put('/settings', async (req, res) => {
         rtp:               parseFloat(savedRTP.toFixed(4)),
         rtp_percent:       parseFloat((savedRTP * 100).toFixed(2)),
         forced:            rtp > RTP_SAFETY_THRESHOLD && force === true,
+        rtp_note:          'Preview assumes 1 treasure slot. Actual RTP is computed at box creation from num_treasures.',
       },
     });
   } catch (err) {
@@ -226,12 +273,14 @@ router.put('/settings', async (req, res) => {
 // ─── POST /api/admin/treasure-box/boxes ──────────────────────────────────────
 /**
  * Create a new available treasure box.
- * Body: { treasure_slot_index }
- * Snapshots total_slots, pop_limit, payout_multiplier from current settings.
+ * Body: { treasure_slot_indexes: number[] }  — array of 1 or more slot indices
+ *   Validation: all values in [0, total_slots), no duplicates,
+ *   count <= floor(total_slots / 2) (no more than half the slots)
+ *   RTP safety check with force override (same pattern as settings).
  */
 router.post('/boxes', async (req, res) => {
   try {
-    const { treasure_slot_index } = req.body;
+    const { treasure_slot_indexes, force = false } = req.body;
 
     const { data: settings } = await supabase
       .from('treasure_box_settings')
@@ -240,27 +289,63 @@ router.post('/boxes', async (req, res) => {
       .single();
 
     if (!settings) return res.status(500).json({ success: false, error: 'Settings not configured' });
-
     if (!settings.is_available) {
       return res.status(409).json({ success: false, error: 'Treasure Box feature is currently disabled' });
     }
 
-    const slotIdx = Math.floor(Number(treasure_slot_index));
-    if (isNaN(slotIdx) || slotIdx < 0 || slotIdx >= settings.total_slots) {
+    // Validate treasure_slot_indexes
+    if (!Array.isArray(treasure_slot_indexes) || treasure_slot_indexes.length === 0) {
       return res.status(400).json({
         success: false,
-        error: `treasure_slot_index must be between 0 and ${settings.total_slots - 1}`,
+        error: 'treasure_slot_indexes must be a non-empty array of slot indices',
+      });
+    }
+
+    const maxTreasures = Math.floor(settings.total_slots / 2);
+    if (treasure_slot_indexes.length > maxTreasures) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot set more than ${maxTreasures} treasure slots (half of total_slots=${settings.total_slots})`,
+      });
+    }
+
+    const parsed = treasure_slot_indexes.map(v => Math.floor(Number(v)));
+    if (parsed.some(v => isNaN(v) || v < 0 || v >= settings.total_slots)) {
+      return res.status(400).json({
+        success: false,
+        error: `All treasure_slot_indexes must be integers in [0, ${settings.total_slots - 1}]`,
+      });
+    }
+    if (new Set(parsed).size !== parsed.length) {
+      return res.status(400).json({ success: false, error: 'treasure_slot_indexes must not contain duplicates' });
+    }
+
+    // RTP safety check using the ACTUAL box config
+    const numTreasures = parsed.length;
+    const rtp = computeRTP(settings.total_slots, settings.pop_limit, numTreasures, Number(settings.payout_multiplier));
+    const rtpPercent = parseFloat((rtp * 100).toFixed(2));
+
+    if (rtp > RTP_SAFETY_THRESHOLD && force !== true) {
+      return res.status(400).json({
+        success: false,
+        code: 'UNSAFE_RTP',
+        error: `This box configuration has an RTP of ${rtpPercent}% (${numTreasures} treasure${numTreasures > 1 ? 's' : ''} in ${settings.total_slots} slots, ${settings.pop_limit} pops, ${settings.payout_multiplier}×) — you would lose money on average. Reduce treasures/payout or increase slots.`,
+        rtp: parseFloat(rtp.toFixed(4)),
+        rtp_percent: rtpPercent,
+        num_treasures: numTreasures,
+        hint: 'Include { "force": true } to override and create anyway.',
       });
     }
 
     const { data: box, error: insertErr } = await supabase
       .from('treasure_boxes')
       .insert({
-        total_slots:         settings.total_slots,
-        pop_limit:           settings.pop_limit,
-        payout_multiplier:   settings.payout_multiplier,
-        treasure_slot_index: slotIdx,
-        status:              'available',
+        total_slots:           settings.total_slots,
+        pop_limit:             settings.pop_limit,
+        payout_multiplier:     settings.payout_multiplier,
+        treasure_slot_index:   parsed[0],           // keep legacy column for single-slot compat
+        treasure_slot_indexes: JSON.stringify(parsed),
+        status:                'available',
       })
       .select('id, total_slots, pop_limit, payout_multiplier, status, created_at')
       .single();
@@ -270,8 +355,16 @@ router.post('/boxes', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to create box' });
     }
 
-    // treasure_slot_index intentionally omitted from response (admin created it, they know it)
-    return res.status(201).json({ success: true, data: { ...box } });
+    return res.status(201).json({
+      success: true,
+      data: {
+        ...box,
+        num_treasures: numTreasures,
+        rtp:           parseFloat(rtp.toFixed(4)),
+        rtp_percent:   rtpPercent,
+        // treasure_slot_indexes intentionally omitted — admin set it, they know it
+      },
+    });
   } catch (err) {
     console.error('POST /admin/treasure-box/boxes error:', err);
     return res.status(500).json({ success: false, error: 'Failed to create box' });
@@ -288,7 +381,7 @@ router.get('/boxes', async (req, res) => {
 
     let query = supabase
       .from('treasure_boxes')
-      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, status, stake, payout, outcome, created_at, claimed_at, completed_at, claimed_by, players(phone, name)')
+      .select('id, total_slots, pop_limit, payout_multiplier, treasure_slot_index, treasure_slot_indexes, status, stake, payout, outcome, created_at, claimed_at, completed_at, claimed_by, players(phone, name)')
       .order('created_at', { ascending: false });
 
     if (statusFilter) query = query.eq('status', statusFilter);
@@ -296,23 +389,35 @@ router.get('/boxes', async (req, res) => {
     const { data: boxes, error } = await query;
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch boxes' });
 
-    const result = (boxes || []).map(b => ({
-      id:                  b.id,
-      total_slots:         b.total_slots,
-      pop_limit:           b.pop_limit,
-      payout_multiplier:   Number(b.payout_multiplier),
-      treasure_slot_index: b.treasure_slot_index, // admin sees this
-      status:              b.status,
-      stake:               b.stake,
-      payout:              b.payout,
-      outcome:             b.outcome,
-      claimed_by:          b.claimed_by,
-      player_phone:        b.players?.phone || null,
-      player_name:         b.players?.name || null,
-      created_at:          b.created_at,
-      claimed_at:          b.claimed_at,
-      completed_at:        b.completed_at,
-    }));
+    const result = (boxes || []).map(b => {
+      const indexes = b.treasure_slot_indexes
+        ? (Array.isArray(b.treasure_slot_indexes) ? b.treasure_slot_indexes : JSON.parse(b.treasure_slot_indexes))
+        : (b.treasure_slot_index !== null ? [b.treasure_slot_index] : []);
+      const numTreasures = indexes.length;
+      const boxRTP = computeRTP(b.total_slots, b.pop_limit, numTreasures, Number(b.payout_multiplier));
+
+      return {
+        id:                  b.id,
+        total_slots:         b.total_slots,
+        pop_limit:           b.pop_limit,
+        payout_multiplier:   Number(b.payout_multiplier),
+        num_treasures:       numTreasures,
+        rtp:                 parseFloat(boxRTP.toFixed(4)),
+        rtp_percent:         parseFloat((boxRTP * 100).toFixed(2)),
+        // Only reveal actual slot positions once box is completed
+        treasure_slot_indexes: b.status === 'completed' ? indexes : undefined,
+        status:              b.status,
+        stake:               b.stake,
+        payout:              b.payout,
+        outcome:             b.outcome,
+        claimed_by:          b.claimed_by,
+        player_phone:        b.players?.phone || null,
+        player_name:         b.players?.name || null,
+        created_at:          b.created_at,
+        claimed_at:          b.claimed_at,
+        completed_at:        b.completed_at,
+      };
+    });
 
     return res.json({ success: true, data: { boxes: result, total: result.length } });
   } catch (err) {
