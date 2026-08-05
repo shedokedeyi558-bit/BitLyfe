@@ -85,8 +85,8 @@ router.get('/', async (req, res) => {
       .from('withdrawal_requests')
       .select(
         `id, player_id, phone, amount, method, account_number, bank_name, bank_code,
-         status, reject_reason, transfer_failed_reason, transfer_reference, created_at,
-         players ( name )`,
+         status, reject_reason, denial_reason, transfer_failed_reason, transfer_reference, created_at,
+         players ( name, phone )`,
         { count: 'exact' }
       )
       .order('created_at', { ascending: false })
@@ -102,29 +102,38 @@ router.get('/', async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch withdrawals' });
 
-    // Build per-status summary counts (only when no filter is applied, cheap parallel count queries)
+    // Expose unmasked player phone from joined players row
+    const withdrawals = (data || []).map(w => ({
+      ...w,
+      player_phone: w.players?.phone || w.phone || null,
+      player_name:  w.players?.name  || null,
+    }));
+
+    // Build per-status summary counts (only when no filter is applied)
     let summary = null;
     if (!status) {
-      const [pendingRes, failedRes, approvedRes, rejectedRes, processingRes] = await Promise.all([
+      const [pendingRes, failedRes, approvedRes, rejectedRes, processingRes, deniedRes] = await Promise.all([
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'transfer_failed'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'processing'),
+        supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'denied'),
       ]);
       summary = {
-        pending: pendingRes.count || 0,
-        processing: processingRes.count || 0,
-        transfer_failed: failedRes.count || 0,
-        approved: approvedRes.count || 0,
-        rejected: rejectedRes.count || 0,
+        pending:         pendingRes.count    || 0,
+        processing:      processingRes.count || 0,
+        transfer_failed: failedRes.count     || 0,
+        approved:        approvedRes.count   || 0,
+        rejected:        rejectedRes.count   || 0,
+        denied:          deniedRes.count     || 0,
       };
     }
 
     return res.json({
       success: true,
       data: {
-        withdrawals: data,
+        withdrawals,
         total: count,
         page: Number(page),
         limit: Number(limit),
@@ -567,6 +576,86 @@ router.put('/:id/reject', async (req, res) => {
   } catch (err) {
     console.error('Reject withdrawal error:', err);
     return res.status(500).json({ success: false, error: 'Failed to reject withdrawal' });
+  }
+});
+
+// ─── DENY (no refund — for fraud/cheating cases) ─────────────────────────────
+
+/**
+ * PUT /api/admin/withdrawals/:id/deny
+ * Deny a withdrawal WITHOUT refunding the player — for confirmed fraud/cheating.
+ *
+ * Marks the withdrawal as 'denied', stores the reason for audit, and does NOT
+ * credit anything back to the player's balance. The amount that was deducted at
+ * request creation remains deducted.
+ *
+ * Require body: { reason: "..." }
+ */
+router.put('/:id/deny', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'A denial reason is required for audit purposes',
+      });
+    }
+
+    const { data: withdrawal, error: fetchErr } = await supabase
+      .from('withdrawal_requests')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !withdrawal) {
+      return res.status(404).json({ success: false, error: 'Withdrawal request not found' });
+    }
+
+    // Allow denying pending or transfer_failed withdrawals
+    // Do NOT allow denying 'processing' — an approve is in flight
+    if (!['pending', 'transfer_failed'].includes(withdrawal.status)) {
+      return res.status(400).json({
+        success: false,
+        error: withdrawal.status === 'processing'
+          ? 'This withdrawal is currently being processed. Wait for the approve to complete before denying.'
+          : `Cannot deny a withdrawal with status: ${withdrawal.status}`,
+      });
+    }
+
+    // Mark denied — NO refund
+    const { data: updated, error: updateErr } = await supabase
+      .from('withdrawal_requests')
+      .update({ status: 'denied', denial_reason: reason.trim() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ success: false, error: 'Failed to deny withdrawal' });
+    }
+
+    // Optional: record a transaction noting the denial — no balance change
+    await supabase.from('transactions').insert({
+      player_id: withdrawal.player_id,
+      type: 'withdrawal_denied',
+      amount: 0,
+      description: `Withdrawal denied (no refund): ${reason.trim()}`,
+    });
+
+    // No notification sent — admin action for fraud cases
+
+    return res.json({
+      success: true,
+      data: {
+        withdrawal: updated,
+        message: 'Withdrawal denied without refund. Amount remains deducted.',
+      },
+    });
+  } catch (err) {
+    console.error('Deny withdrawal error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to deny withdrawal' });
   }
 });
 
