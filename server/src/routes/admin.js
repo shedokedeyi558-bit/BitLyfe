@@ -1135,17 +1135,31 @@ router.get('/analytics/activity', async (req, res) => {
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
 /**
+/**
  * POST /api/admin/notifications/broadcast
- * Send a notification to every active player at once.
  *
- * Body: { title: string (max 80), message: string (max 300), type?: string }
- * type is always stored as "announcement" regardless of what is sent.
+ * Body: {
+ *   title:      string (max 80)  — required
+ *   message:    string (max 300) — required
+ *   target:     "all" | "specific" | "filter"  — default "all"
  *
- * Returns: { success: true, data: { message: "Notification sent", sent_count: N } }
+ *   -- when target = "specific" --
+ *   player_ids: string[]  — array of player UUIDs to notify
+ *
+ *   -- when target = "filter" --
+ *   filter: {
+ *     status?:          "active" | "banned"
+ *     min_balance?:     integer  — players with balance >= this
+ *     max_balance?:     integer  — players with balance <= this
+ *     has_pending_withdrawal?: boolean  — players with a pending withdrawal_request
+ *   }
+ * }
+ *
+ * Returns: { success: true, data: { message, sent_count, target } }
  */
 router.post('/notifications/broadcast', async (req, res) => {
   try {
-    const { title, message } = req.body;
+    const { title, message, target = 'all', player_ids, filter = {} } = req.body;
 
     // Validate required fields
     if (!title || typeof title !== 'string' || title.trim().length === 0) {
@@ -1160,37 +1174,98 @@ router.post('/notifications/broadcast', async (req, res) => {
     if (message.trim().length > 300) {
       return res.status(400).json({ success: false, error: 'message must be 300 characters or fewer' });
     }
+    if (!['all', 'specific', 'filter'].includes(target)) {
+      return res.status(400).json({ success: false, error: 'target must be "all", "specific", or "filter"' });
+    }
+    if (target === 'specific') {
+      if (!Array.isArray(player_ids) || player_ids.length === 0) {
+        return res.status(400).json({ success: false, error: 'player_ids must be a non-empty array when target is "specific"' });
+      }
+    }
 
     const cleanTitle = title.trim();
     const cleanMessage = message.trim();
     const now = new Date().toISOString();
 
-    // Fetch all active player IDs
-    const { data: players, error: playersErr } = await supabase
-      .from('players')
-      .select('id')
-      .eq('status', 'active');
+    let recipientIds = [];
 
-    if (playersErr) {
-      console.error('Broadcast — player fetch error:', playersErr);
-      return res.status(500).json({ success: false, error: 'Failed to fetch players' });
+    if (target === 'specific') {
+      // Use the provided player_ids directly — validate they exist
+      const { data: found } = await supabase
+        .from('players')
+        .select('id')
+        .in('id', player_ids);
+      recipientIds = (found || []).map(p => p.id);
+
+    } else if (target === 'filter') {
+      // Build dynamic query from filter object
+      let query = supabase.from('players').select('id');
+
+      // status filter — default to active if not specified
+      const statusFilter = filter.status || 'active';
+      if (statusFilter) query = query.eq('status', statusFilter);
+
+      // balance range filters
+      if (filter.min_balance !== undefined && filter.min_balance !== null) {
+        query = query.gte('balance', Number(filter.min_balance));
+      }
+      if (filter.max_balance !== undefined && filter.max_balance !== null) {
+        query = query.lte('balance', Number(filter.max_balance));
+      }
+
+      const { data: filtered, error: filterErr } = await query;
+      if (filterErr) {
+        console.error('Broadcast filter error:', filterErr);
+        return res.status(500).json({ success: false, error: 'Failed to filter players' });
+      }
+
+      let ids = (filtered || []).map(p => p.id);
+
+      // has_pending_withdrawal: cross-reference withdrawal_requests
+      if (filter.has_pending_withdrawal === true) {
+        const { data: pendingW } = await supabase
+          .from('withdrawal_requests')
+          .select('player_id')
+          .eq('status', 'pending');
+        const pendingSet = new Set((pendingW || []).map(w => w.player_id));
+        ids = ids.filter(id => pendingSet.has(id));
+      } else if (filter.has_pending_withdrawal === false) {
+        const { data: pendingW } = await supabase
+          .from('withdrawal_requests')
+          .select('player_id')
+          .eq('status', 'pending');
+        const pendingSet = new Set((pendingW || []).map(w => w.player_id));
+        ids = ids.filter(id => !pendingSet.has(id));
+      }
+
+      recipientIds = ids;
+
+    } else {
+      // target = 'all' — all active players (original behavior)
+      const { data: players, error: playersErr } = await supabase
+        .from('players')
+        .select('id')
+        .eq('status', 'active');
+      if (playersErr) {
+        console.error('Broadcast — player fetch error:', playersErr);
+        return res.status(500).json({ success: false, error: 'Failed to fetch players' });
+      }
+      recipientIds = (players || []).map(p => p.id);
     }
 
-    if (!players || players.length === 0) {
-      return res.json({ success: true, data: { message: 'Notification sent', sent_count: 0 } });
+    if (recipientIds.length === 0) {
+      return res.json({ success: true, data: { message: 'No matching players — 0 notifications sent', sent_count: 0, target } });
     }
 
-    // Build bulk insert rows — one per active player
-    const rows = players.map((p) => ({
-      player_id:  p.id,
-      type:       'announcement',   // always fixed — never use a player-facing type here
+    const rows = recipientIds.map((id) => ({
+      player_id:  id,
+      type:       'announcement',
       title:      cleanTitle,
       message:    cleanMessage,
       read:       false,
       created_at: now,
     }));
 
-    // Bulk insert — Supabase handles batching internally
     const { error: insertErr } = await supabase.from('notifications').insert(rows);
 
     if (insertErr) {
@@ -1203,6 +1278,7 @@ router.post('/notifications/broadcast', async (req, res) => {
       data: {
         message: 'Notification sent',
         sent_count: rows.length,
+        target,
       },
     });
   } catch (err) {
@@ -1212,6 +1288,7 @@ router.post('/notifications/broadcast', async (req, res) => {
 });
 
 // ─── EXPORT ───────────────────────────────────────────────────────────────────
+
 
 /**
  * GET /api/admin/export
