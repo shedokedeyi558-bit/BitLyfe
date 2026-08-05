@@ -373,7 +373,9 @@ router.post('/boxes', async (req, res) => {
 
 // ─── GET /api/admin/treasure-box/boxes ───────────────────────────────────────
 /**
- * List all boxes with full detail including claimed player phone and outcome.
+ * List all boxes with full detail including claimed player phone, outcome,
+ * and the full pop sequence (pop_number, slot_index, was_treasure) for each box.
+ * Boxes with status='available' return an empty pops array.
  */
 router.get('/boxes', async (req, res) => {
   try {
@@ -388,6 +390,31 @@ router.get('/boxes', async (req, res) => {
 
     const { data: boxes, error } = await query;
     if (error) return res.status(500).json({ success: false, error: 'Failed to fetch boxes' });
+
+    // Fetch all pops for every box returned in a single query, then group by box_id
+    const boxIds = (boxes || []).map(b => b.id);
+    let popsByBoxId = {};
+    if (boxIds.length > 0) {
+      const { data: allPops, error: popsError } = await supabase
+        .from('treasure_box_pops')
+        .select('box_id, pop_number, slot_index, was_treasure')
+        .in('box_id', boxIds)
+        .order('pop_number', { ascending: true });
+
+      if (popsError) {
+        console.error('GET /admin/treasure-box/boxes — failed to fetch pops:', popsError);
+        return res.status(500).json({ success: false, error: 'Failed to fetch pop data' });
+      }
+
+      for (const pop of (allPops || [])) {
+        if (!popsByBoxId[pop.box_id]) popsByBoxId[pop.box_id] = [];
+        popsByBoxId[pop.box_id].push({
+          pop_number:   pop.pop_number,
+          slot_index:   pop.slot_index,
+          was_treasure: pop.was_treasure,
+        });
+      }
+    }
 
     const result = (boxes || []).map(b => {
       const indexes = b.treasure_slot_indexes
@@ -416,6 +443,8 @@ router.get('/boxes', async (req, res) => {
         created_at:          b.created_at,
         claimed_at:          b.claimed_at,
         completed_at:        b.completed_at,
+        // Full ordered pop sequence — empty array if no pops have occurred yet
+        pops:                popsByBoxId[b.id] || [],
       };
     });
 
