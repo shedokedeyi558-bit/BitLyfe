@@ -718,11 +718,14 @@ router.put('/:id/mark-paid-manual', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Failed to update withdrawal status' });
     }
 
-    // Audit transaction — no balance change (amount 0 is a record-only entry)
+    // ── Audit transaction — admin-only, never shown to player ─────────────────
+    // The balance was already deducted at withdrawal_pending creation time.
+    // This record is purely an audit trail that the admin completed the payout manually.
+    // amount: 0 — no second deduction occurs.
     await supabase.from('transactions').insert({
       player_id:   withdrawal.player_id,
       type:        'withdrawal_manual',
-      amount:      -withdrawal.amount,   // mirrors the real deduction for ledger accuracy
+      amount:      0,
       description: `Manual withdrawal payment: ₦${withdrawal.amount.toLocaleString()}${reference ? ` (ref: ${reference.trim()})` : ''}`,
     });
 

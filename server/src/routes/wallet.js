@@ -379,15 +379,17 @@ router.get('/transactions', auth, async (req, res) => {
     const { page = 1, limit = 20 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    // Exclude deposit_pending rows — these are internal tracking records for
-    // in-flight payments. They are not completed transactions. If a user starts
-    // a deposit and abandons it, it should not appear in their history at all.
-    // When a deposit completes, the deposit_pending row is replaced by a 'deposit' row.
+    // Exclude types that are admin-only audit records and must never appear in the player's feed:
+    //   deposit_pending    — internal in-flight deposit tracker, replaced by 'deposit' on completion
+    //   withdrawal_manual  — admin audit trail for manually paid withdrawals; amount is 0, not a real deduction
+    //   withdrawal_denied  — admin audit trail for denied (fraud) withdrawals; amount is 0, not a real deduction
     const { data, error, count } = await supabase
       .from('transactions')
       .select('id, type, amount, description, reference, created_at', { count: 'exact' })
       .eq('player_id', req.player.id)
       .neq('type', 'deposit_pending')
+      .neq('type', 'withdrawal_manual')
+      .neq('type', 'withdrawal_denied')
       .order('created_at', { ascending: false })
       .range(offset, offset + Number(limit) - 1);
 
