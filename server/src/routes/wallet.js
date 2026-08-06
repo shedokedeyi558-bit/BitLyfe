@@ -516,20 +516,28 @@ router.get('/resolve-account', auth, async (req, res) => {
 /**
  * POST /api/wallet/withdraw
  * Create a withdrawal request.
- * Body: { amount, accountNumber, bankCode, bankName }
- *   bankCode  — Squad numeric bank code (e.g. "100004"). Required.
- *   bankName  — Human-readable bank name. Stored for display, not used for transfers.
- *   method    — Optional. Defaults to 'bank_transfer'. Frontend does not send this.
+ * Body: { amount, accountNumber, bankCode, bankName, accountName }
+ *   bankCode     — Squad numeric bank code (e.g. "100004"). Required.
+ *   bankName     — Human-readable bank name. Stored for display, not used for transfers.
+ *   accountName  — Account holder name as resolved by Paystack. Required — used by admin for manual payout verification.
+ *   method       — Optional. Defaults to 'bank_transfer'. Frontend does not send this.
  */
 router.post('/withdraw', auth, async (req, res) => {
   try {
-    const { amount, accountNumber, bankCode, bankName, method } = req.body;
+    const { amount, accountNumber, bankCode, bankName, accountName, method } = req.body;
     const player = req.player;
 
     if (!amount || !accountNumber || !bankCode) {
       return res.status(400).json({
         success: false,
         error: 'amount, accountNumber, and bankCode are required. Use GET /api/wallet/banks to get the correct bankCode.',
+      });
+    }
+
+    if (!accountName || !accountName.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'accountName is required. Resolve the account name first via GET /api/wallet/resolve-account.',
       });
     }
 
@@ -590,6 +598,7 @@ router.post('/withdraw', auth, async (req, res) => {
         amount: amountNum,
         method: withdrawalMethod,
         account_number: accountNumber,
+        account_name: accountName.trim(),
         bank_code: bankCode,
         bank_name: bankName || null,   // display only — not used for transfers
         transfer_reference: transferReference,  // pre-assigned, never changes

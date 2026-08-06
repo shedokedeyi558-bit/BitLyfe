@@ -84,7 +84,7 @@ router.get('/', async (req, res) => {
     let query = supabase
       .from('withdrawal_requests')
       .select(
-        `id, player_id, phone, amount, method, account_number, bank_name, bank_code,
+        `id, player_id, phone, amount, method, account_number, account_name, bank_name, bank_code,
          status, reject_reason, denial_reason, manual_reference, manual_note,
          transfer_failed_reason, transfer_reference, created_at,
          players ( name, phone )`,
