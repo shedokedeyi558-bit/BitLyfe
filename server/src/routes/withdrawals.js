@@ -85,7 +85,8 @@ router.get('/', async (req, res) => {
       .from('withdrawal_requests')
       .select(
         `id, player_id, phone, amount, method, account_number, bank_name, bank_code,
-         status, reject_reason, denial_reason, transfer_failed_reason, transfer_reference, created_at,
+         status, reject_reason, denial_reason, manual_reference, manual_note,
+         transfer_failed_reason, transfer_reference, created_at,
          players ( name, phone )`,
         { count: 'exact' }
       )
@@ -112,13 +113,14 @@ router.get('/', async (req, res) => {
     // Build per-status summary counts (only when no filter is applied)
     let summary = null;
     if (!status) {
-      const [pendingRes, failedRes, approvedRes, rejectedRes, processingRes, deniedRes] = await Promise.all([
+      const [pendingRes, failedRes, approvedRes, rejectedRes, processingRes, deniedRes, paidManualRes] = await Promise.all([
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'transfer_failed'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'processing'),
         supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'denied'),
+        supabase.from('withdrawal_requests').select('id', { count: 'exact', head: true }).eq('status', 'paid_manual'),
       ]);
       summary = {
         pending:         pendingRes.count    || 0,
@@ -127,6 +129,7 @@ router.get('/', async (req, res) => {
         approved:        approvedRes.count   || 0,
         rejected:        rejectedRes.count   || 0,
         denied:          deniedRes.count     || 0,
+        paid_manual:     paidManualRes.count || 0,
       };
     }
 
@@ -656,6 +659,90 @@ router.put('/:id/deny', async (req, res) => {
   } catch (err) {
     console.error('Deny withdrawal error:', err);
     return res.status(500).json({ success: false, error: 'Failed to deny withdrawal' });
+  }
+});
+
+// ─── MARK PAID MANUAL ────────────────────────────────────────────────────────
+
+/**
+ * PUT /api/admin/withdrawals/:id/mark-paid-manual
+ * Mark a withdrawal as manually paid (admin sent money via OPay or similar).
+ *
+ * Does NOT call Squad/Paystack at all — purely a status update for the bridging
+ * period while automated transfers are blocked pending EDD approval.
+ *
+ * No balance change — the amount was already deducted at withdrawal-request time.
+ *
+ * Body: { reference?: string, note?: string }
+ *   reference — optional payment reference the admin recorded (e.g. OPay txn ID)
+ *   note      — optional free-text note for admin records
+ *
+ * Valid from: pending, transfer_failed
+ */
+router.put('/:id/mark-paid-manual', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reference, note } = req.body || {};
+
+    const { data: withdrawal, error: fetchErr } = await supabase
+      .from('withdrawal_requests')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !withdrawal) {
+      return res.status(404).json({ success: false, error: 'Withdrawal request not found' });
+    }
+
+    if (!['pending', 'transfer_failed'].includes(withdrawal.status)) {
+      return res.status(400).json({
+        success: false,
+        error: withdrawal.status === 'processing'
+          ? 'This withdrawal is currently being processed by the automated flow. Wait for it to complete first.'
+          : `Cannot mark a withdrawal with status '${withdrawal.status}' as manually paid.`,
+      });
+    }
+
+    const { data: updated, error: updateErr } = await supabase
+      .from('withdrawal_requests')
+      .update({
+        status:           'paid_manual',
+        manual_reference: reference?.trim() || null,
+        manual_note:      note?.trim()      || null,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) {
+      return res.status(500).json({ success: false, error: 'Failed to update withdrawal status' });
+    }
+
+    // Audit transaction — no balance change (amount 0 is a record-only entry)
+    await supabase.from('transactions').insert({
+      player_id:   withdrawal.player_id,
+      type:        'withdrawal_manual',
+      amount:      -withdrawal.amount,   // mirrors the real deduction for ledger accuracy
+      description: `Manual withdrawal payment: ₦${withdrawal.amount.toLocaleString()}${reference ? ` (ref: ${reference.trim()})` : ''}`,
+    });
+
+    await createNotification(
+      withdrawal.player_id,
+      'withdrawal_approved',
+      'Withdrawal processed',
+      `₦${withdrawal.amount.toLocaleString()} has been sent to your account`
+    ).catch(() => {});
+
+    return res.json({
+      success: true,
+      data: {
+        withdrawal: updated,
+        message: 'Withdrawal marked as manually paid. No automated transfer was initiated.',
+      },
+    });
+  } catch (err) {
+    console.error('Mark paid manual error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to mark withdrawal as manually paid' });
   }
 });
 
