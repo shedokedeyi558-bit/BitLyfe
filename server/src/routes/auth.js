@@ -785,22 +785,29 @@ router.post('/admin-login', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Email and password are required' });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+    console.log(`[admin-login] Attempt for: ${normalizedEmail}`);
+
     // First try new unified system (players table with is_admin)
-    const { data: player } = await supabase
+    const { data: player, error: playerErr } = await supabase
       .from('players')
       .select('id, email, password_hash, is_admin')
-      .eq('email', email.trim().toLowerCase())
+      .eq('email', normalizedEmail)
       .eq('is_admin', true)
       .maybeSingle();
 
+    console.log(`[admin-login] players table result — found: ${!!player}, error: ${playerErr?.message || 'none'}, has_hash: ${!!player?.password_hash}`);
+
     if (player && player.password_hash) {
       const isMatch = await bcrypt.compare(password, player.password_hash);
+      console.log(`[admin-login] bcrypt.compare (players) — match: ${isMatch}`);
       if (isMatch) {
         const token = jwt.sign(
           { playerId: player.id, adminId: player.id, email: player.email, is_admin: true },
           process.env.JWT_SECRET,
           { expiresIn: '30m' }   // 30-minute admin sessions
         );
+        console.log(`[admin-login] SUCCESS via players table for: ${normalizedEmail}`);
         return res.json({
           success: true,
           data: {
@@ -812,19 +819,24 @@ router.post('/admin-login', async (req, res) => {
     }
 
     // Fall back to old admins table
-    const { data: admin, error } = await supabase
+    const { data: admin, error: adminErr } = await supabase
       .from('admins')
       .select('id, email, password_hash')
-      .eq('email', email.trim().toLowerCase())
+      .eq('email', normalizedEmail)
       .maybeSingle();
 
+    console.log(`[admin-login] admins table result — found: ${!!admin}, error: ${adminErr?.message || 'none'}, has_hash: ${!!admin?.password_hash}`);
+
     if (!admin) {
+      console.log(`[admin-login] FAIL — not found in either table for: ${normalizedEmail}`);
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
 
     const isMatch = await bcrypt.compare(password, admin.password_hash);
+    console.log(`[admin-login] bcrypt.compare (admins) — match: ${isMatch}`);
 
     if (!isMatch) {
+      console.log(`[admin-login] FAIL — password mismatch (admins table) for: ${normalizedEmail}`);
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
 
@@ -832,6 +844,7 @@ router.post('/admin-login', async (req, res) => {
       expiresIn: '30m',    // 30-minute admin sessions
     });
 
+    console.log(`[admin-login] SUCCESS via admins table for: ${normalizedEmail}`);
     return res.json({
       success: true,
       data: {
