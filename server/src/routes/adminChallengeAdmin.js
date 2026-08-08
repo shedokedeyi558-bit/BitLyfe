@@ -331,6 +331,7 @@ router.get('/settings', async (req, res) => {
       .single();
 
     if (error || !settings) return res.status(500).json({ success: false, error: 'Settings not found' });
+    console.log(`[beat-the-admin/settings GET] read:`, JSON.stringify({ id: settings.id, is_available: settings.is_available, num_rounds: settings.num_rounds }));
     return res.json({ success: true, data: { settings } });
   } catch (err) {
     console.error('beat-the-admin/GET settings error:', err);
@@ -390,6 +391,10 @@ router.put('/settings', async (req, res) => {
       .single();
 
     if (error) return res.status(500).json({ success: false, error: 'Failed to update settings' });
+
+    console.log(`[beat-the-admin/settings PUT] wrote:`, JSON.stringify(updates));
+    console.log(`[beat-the-admin/settings PUT] persisted:`, JSON.stringify({ id: updated.id, is_available: updated.is_available, num_rounds: updated.num_rounds, min_stake: updated.min_stake, max_stake: updated.max_stake }));
+
     return res.json({ success: true, data: { settings: updated } });
   } catch (err) {
     console.error('beat-the-admin/settings error:', err);
