@@ -266,6 +266,29 @@ router.post('/match/:matchId/move', async (req, res) => {
   }
 });
 
+// ─── GET /settings ────────────────────────────────────────────────────────────
+/**
+ * Returns current admin_challenge_settings row.
+ */
+router.get('/settings', async (req, res) => {
+  try {
+    const { data: settings, error } = await supabase
+      .from('admin_challenge_settings')
+      .select('*')
+      .eq('id', 1)
+      .single();
+
+    if (error || !settings) {
+      return res.status(500).json({ success: false, error: 'Settings not found' });
+    }
+
+    return res.json({ success: true, data: { settings } });
+  } catch (err) {
+    console.error('beat-the-admin/GET settings error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch settings' });
+  }
+});
+
 // ─── PUT /settings ────────────────────────────────────────────────────────────
 /**
  * Body: { max_stake?, min_stake?, is_available?, request_expiry_seconds? }
