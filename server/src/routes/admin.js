@@ -11,6 +11,33 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 // Apply admin auth to all routes in this file
 router.use(adminAuth);
 
+// ─── SHARED TRANSACTION TYPE CONSTANTS ───────────────────────────────────────
+// Single source of truth — update here when new game modes are added.
+// Used by stats, analytics, computePlayerStats, and any other revenue/payout aggregation.
+
+const REVENUE_TYPES = [
+  'entry_fee',             // Doors game
+  'blitz_entry',           // Blitz tournaments
+  'treasure_box_entry',    // Treasure Box
+  'admin_challenge_entry', // Beat the Admin
+  'challenge_entry',       // Challenges
+  'pill_open',             // Pills (dormant — keep for historical data)
+  'pill_play',             // Pills alternate type (dormant)
+  'prediction_enter',      // Predictions (dormant — keep for historical data)
+];
+
+const PAYOUT_TYPES = [
+  'prize',                 // Doors game win
+  'blitz_prize',           // Blitz tournament prize
+  'treasure_box_win',      // Treasure Box win
+  'admin_challenge_win',   // Beat the Admin win
+  'admin_challenge_draw',  // Beat the Admin draw (refund — counts as payout)
+  'challenge_win',         // Challenge win
+  'specials_win',          // Specials pack win
+  'pill_win',              // Pills win (dormant — keep for historical data)
+  'prediction_win',        // Predictions win (dormant — keep for historical data)
+];
+
 // ─── STATS ────────────────────────────────────────────────────────────────────
 
 /**
@@ -60,11 +87,11 @@ router.get('/stats', async (req, res) => {
     const transactions = transactionsRes || [];
 
     const revenueToday = transactions
-      .filter((t) => ['prediction_enter', 'pill_open', 'pill_play', 'blitz_entry', 'entry_fee'].includes(t.type))
+      .filter((t) => REVENUE_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const payoutsToday = transactions
-      .filter((t) => ['prediction_win', 'pill_win', 'blitz_prize', 'prize'].includes(t.type))
+      .filter((t) => PAYOUT_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const profitToday = revenueToday - payoutsToday;
@@ -349,10 +376,8 @@ async function computePlayerStats(playerId) {
     .select('type, amount')
     .eq('player_id', playerId);
 
-  const WIN_TYPES   = ['prize', 'pill_win', 'specials_win', 'prediction_win', 'blitz_prize', 'challenge_win',
-                       'admin_challenge_win', 'treasure_box_win'];
-  const ENTRY_TYPES = ['entry_fee', 'pill_open', 'prediction_enter', 'blitz_entry', 'challenge_entry',
-                       'admin_challenge_entry', 'treasure_box_entry'];
+  const WIN_TYPES   = PAYOUT_TYPES;
+  const ENTRY_TYPES = REVENUE_TYPES;
   const entries  = (txns || []).filter((t) => ENTRY_TYPES.includes(t.type));
   const wins     = (txns || []).filter((t) => WIN_TYPES.includes(t.type));
   const totalWon   = wins.reduce((sum, t) => sum + Math.abs(t.amount), 0);
@@ -985,31 +1010,24 @@ router.get('/analytics/overview', async (req, res) => {
       withdrawalsRes,
       allPlayersRes,
       newPlayersRes,
-      pillPlaysRes,
-      predictionEntriesRes,
       blitzRegsRes,
-      gameSessionsRes,
     ] = await Promise.all([
-      withRange(supabase.from('transactions').select('type, amount')),
+      withRange(supabase.from('transactions').select('type, amount, player_id')),
       supabase.from('withdrawal_requests').select('status, amount'),
       supabase.from('players').select('id', { count: 'exact', head: true }),
       withRange(supabase.from('players').select('id', { count: 'exact', head: true })),
-      withRange(supabase.from('pill_plays').select('id', { count: 'exact', head: true })),
-      withRange(supabase.from('prediction_participations').select('id', { count: 'exact', head: true })),
       withRange(supabase.from('blitz_registrations').select('id', { count: 'exact', head: true }), 'registered_at'),
-      // player_ids only — for active_this_period unique count
-      withRange(supabase.from('game_sessions').select('player_id'), 'played_at'),
     ]);
 
     // ── Money metrics ─────────────────────────────────────────────────────
     const transactions = transactionsRes.data || [];
 
     const totalRevenue = transactions
-      .filter((t) => ['prediction_enter', 'pill_open', 'pill_play', 'blitz_entry', 'entry_fee'].includes(t.type))
+      .filter((t) => REVENUE_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const totalPayouts = transactions
-      .filter((t) => ['prediction_win', 'pill_win', 'blitz_prize', 'prize'].includes(t.type))
+      .filter((t) => PAYOUT_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const allWithdrawals = withdrawalsRes.data || [];
@@ -1020,14 +1038,22 @@ router.get('/analytics/overview', async (req, res) => {
     // ── Player metrics ────────────────────────────────────────────────────
     const totalRegistered = allPlayersRes.count || 0;
     const newThisPeriod = newPlayersRes.count || 0;
-    const gameSessions = gameSessionsRes.data || [];
-    const activeThisPeriod = new Set(gameSessions.map((s) => s.player_id).filter(Boolean)).size;
+    // Derive active players from transactions — anyone with a revenue entry in the period
+    const activeThisPeriod = new Set(
+      transactions.filter(t => REVENUE_TYPES.includes(t.type)).map(t => t.player_id).filter(Boolean)
+    ).size;
 
     // ── Game metrics ──────────────────────────────────────────────────────
-    const pillsPlayed = pillPlaysRes.count || 0;
-    const predictionsEntered = predictionEntriesRes.count || 0;
-    const blitzRegistrations = blitzRegsRes.count || 0;
-    const totalPlays = pillsPlayed + predictionsEntered + blitzRegistrations;
+    // Count plays per game mode from the transactions already fetched (no extra queries)
+    const blitzRegistrations   = blitzRegsRes.count || 0;
+    const treasureBoxPlays     = transactions.filter(t => t.type === 'treasure_box_entry').length;
+    const beatTheAdminPlays    = transactions.filter(t => t.type === 'admin_challenge_entry').length;
+    const pillsPlayed          = transactions.filter(t => t.type === 'pill_open' || t.type === 'pill_play').length;
+    const predictionsEntered   = transactions.filter(t => t.type === 'prediction_enter').length;
+    const challengesEntered    = transactions.filter(t => t.type === 'challenge_entry').length;
+    const doorsPlayed          = transactions.filter(t => t.type === 'entry_fee').length;
+    const totalPlays = blitzRegistrations + treasureBoxPlays + beatTheAdminPlays +
+                       pillsPlayed + predictionsEntered + challengesEntered + doorsPlayed;
 
     // ── Withdrawal metrics ────────────────────────────────────────────────
     const totalRequested = allWithdrawals.length;
@@ -1051,10 +1077,14 @@ router.get('/analytics/overview', async (req, res) => {
           active_this_period: activeThisPeriod,
         },
         games: {
-          pills_played: pillsPlayed,
-          predictions_entered: predictionsEntered,
-          blitz_registrations: blitzRegistrations,
-          total_plays: totalPlays,
+          blitz_registrations:   blitzRegistrations,
+          treasure_box_plays:    treasureBoxPlays,
+          beat_the_admin_plays:  beatTheAdminPlays,
+          challenges_entered:    challengesEntered,
+          doors_played:          doorsPlayed,
+          pills_played:          pillsPlayed,          // dormant — historical data
+          predictions_entered:   predictionsEntered,   // dormant — historical data
+          total_plays:           totalPlays,
         },
         withdrawals: {
           total_requested: totalRequested,

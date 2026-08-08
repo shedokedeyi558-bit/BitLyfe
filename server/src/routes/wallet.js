@@ -59,11 +59,16 @@ router.get('/spend-summary', auth, async (req, res) => {
     const nowISO = now.toISOString();
 
     // Get entry-fee transactions (spending only, not deposits/refunds)
+    const SPEND_TYPES = [
+      'entry_fee', 'blitz_entry', 'treasure_box_entry', 'admin_challenge_entry',
+      'challenge_entry', 'pill_open', 'prediction_enter',
+    ];
+
     const { data: todayTxns } = await supabase
       .from('transactions')
       .select('amount')
       .eq('player_id', player.id)
-      .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
+      .in('type', SPEND_TYPES)
       .gte('created_at', startOfDayISO)
       .lte('created_at', nowISO);
 
@@ -71,7 +76,7 @@ router.get('/spend-summary', auth, async (req, res) => {
       .from('transactions')
       .select('amount')
       .eq('player_id', player.id)
-      .in('type', ['prediction_enter', 'pill_open', 'blitz_entry', 'entry_fee'])
+      .in('type', SPEND_TYPES)
       .gte('created_at', startOfWeekISO)
       .lte('created_at', nowISO);
 
