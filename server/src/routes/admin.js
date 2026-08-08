@@ -38,6 +38,17 @@ const PAYOUT_TYPES = [
   'prediction_win',        // Predictions win (dormant — keep for historical data)
 ];
 
+// In-game refunds — stake returned to player without a win (expiry, rejection, draw, etc.)
+// Used to compute NET revenue: entries - payouts - refunds = actual platform margin
+const REFUND_TYPES = [
+  'admin_challenge_refund', // Beat the Admin — expired or rejected request
+  'challenge_refund',       // Challenge refund
+  'blitz_refund',           // Blitz refund
+  'pill_refund',            // Pills refund
+  'prediction_refund',      // Predictions refund
+  // NOTE: withdrawal_refund is a wallet operation (not a game refund) — excluded intentionally
+];
+
 // ─── STATS ────────────────────────────────────────────────────────────────────
 
 /**
@@ -86,7 +97,7 @@ router.get('/stats', async (req, res) => {
 
     const transactions = transactionsRes || [];
 
-    const revenueToday = transactions
+    const grossRevenueToday = transactions
       .filter((t) => REVENUE_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
@@ -94,7 +105,14 @@ router.get('/stats', async (req, res) => {
       .filter((t) => PAYOUT_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
-    const profitToday = revenueToday - payoutsToday;
+    const refundsToday = transactions
+      .filter((t) => REFUND_TYPES.includes(t.type))
+      .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    // Net revenue = gross entries - payouts - in-game refunds
+    const revenueToday = grossRevenueToday - payoutsToday - refundsToday;
+
+    const profitToday = revenueToday;
 
     // ── Total Players & Pending Withdrawals ────────────────────────────────
     const { count: totalPlayers } = await supabase
@@ -110,8 +128,10 @@ router.get('/stats', async (req, res) => {
       success: true,
       data: {
         playsToday,
-        revenueToday,
+        revenueToday,         // net: gross entries - payouts - refunds
+        grossRevenueToday,    // raw entry fees collected
         payoutsToday,
+        refundsToday,
         profitToday,
         totalPlayers,
         pendingWithdrawals,
@@ -1022,13 +1042,20 @@ router.get('/analytics/overview', async (req, res) => {
     // ── Money metrics ─────────────────────────────────────────────────────
     const transactions = transactionsRes.data || [];
 
-    const totalRevenue = transactions
+    const grossRevenue = transactions
       .filter((t) => REVENUE_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     const totalPayouts = transactions
       .filter((t) => PAYOUT_TYPES.includes(t.type))
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    const totalRefunds = transactions
+      .filter((t) => REFUND_TYPES.includes(t.type))
+      .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    // Net revenue = gross entries - payouts - in-game refunds
+    const totalRevenue = grossRevenue - totalPayouts - totalRefunds;
 
     const allWithdrawals = withdrawalsRes.data || [];
     const pendingWithdrawalValue = allWithdrawals
@@ -1066,10 +1093,12 @@ router.get('/analytics/overview', async (req, res) => {
       data: {
         period,
         money: {
-          total_revenue: totalRevenue,
-          total_payouts: totalPayouts,
-          net_profit: totalRevenue - totalPayouts,
-          pending_withdrawal_value: pendingWithdrawalValue,
+          gross_revenue:           grossRevenue,
+          total_payouts:           totalPayouts,
+          total_refunds:           totalRefunds,
+          total_revenue:           totalRevenue,   // net: gross - payouts - refunds
+          net_profit:              totalRevenue,   // alias — same value, kept for frontend compat
+          pending_withdrawal_value:pendingWithdrawalValue,
         },
         players: {
           total_registered: totalRegistered,
